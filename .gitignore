@@ -1,0 +1,7 @@
+secrets/
+tls/
+
+vault/app-cert/
+vault/vault-cert/
+vault/unseal-config/
+vault/manual

@@ -1,0 +1,200 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: database
+  labels:
+    app: mysql
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      serviceAccountName: database-sa
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: vault-sa-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  path: vault-token
+                  expirationSeconds: 3600
+                  audience: vault
+        - name: vault-agent-config
+          configMap:
+            name: database-vault-agent-config
+        - name: vault-secrets
+          emptyDir:
+            medium: Memory
+        - name: vault-agent-home
+          emptyDir:
+            medium: Memory
+        - name: tmp-volume
+          emptyDir: {}
+        - name: run-volume
+          emptyDir: {}
+        - name: vault-ca
+          secret:
+            secretName: vault-ca
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 3306
+              name: mysql
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: MYSQL_DATABASE
+              valueFrom:
+                configMapKeyRef:
+                  name: mysql-config
+                  key: MYSQL_DATABASE
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              if [ -f /vault/secrets/mysql-env ]; then
+                set -a
+                . /vault/secrets/mysql-env
+                set +a
+              fi
+              exec docker-entrypoint.sh mysqld
+          volumeMounts:
+            - name: mysql-storage
+              mountPath: /var/lib/mysql
+            - name: tmp-volume
+              mountPath: /tmp
+            - name: run-volume
+              mountPath: /var/run/mysqld
+            - name: vault-secrets
+              mountPath: /vault/secrets
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  if [ -f /vault/secrets/mysql-env ]; then
+                    set -a
+                    . /vault/secrets/mysql-env
+                    set +a
+                  fi
+                  mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  if [ -f /vault/secrets/mysql-env ]; then
+                    set -a
+                    . /vault/secrets/mysql-env
+                    set +a
+                  fi
+                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'SELECT 1;'
+            initialDelaySeconds: 90
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          startupProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - |
+                  if [ -f /vault/secrets/mysql-env ]; then
+                    set -a
+                    . /vault/secrets/mysql-env
+                    set +a
+                  fi
+                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'SELECT 1;'
+            periodSeconds: 10
+            failureThreshold: 30
+
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    if [ -f /vault/secrets/mysql-env ]; then
+                      set -a
+                      . /vault/secrets/mysql-env
+                      set +a
+                    fi
+                    mysqladmin shutdown -uroot -p"$MYSQL_ROOT_PASSWORD"
+        - name: vault-agent
+          image: hashicorp/vault:1.20.4
+          imagePullPolicy: IfNotPresent
+          command: ["vault"]
+          args:
+            - agent
+            - -config=/etc/vault/config.hcl
+          env:
+            - name: VAULT_LOG_LEVEL
+              value: info
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: vault-sa-token
+              mountPath: /var/run/secrets/tokens
+              readOnly: true
+            - name: vault-agent-config
+              mountPath: /etc/vault
+              readOnly: true
+            - name: vault-secrets
+              mountPath: /vault/secrets
+            - name: vault-agent-home
+              mountPath: /home/vault
+            - name: vault-ca
+              mountPath: /vault/ca
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "250m"
+              memory: "128Mi"
+  volumeClaimTemplates:
+    - metadata:
+        name: mysql-storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi

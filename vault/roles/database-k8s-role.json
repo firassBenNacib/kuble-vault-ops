@@ -1,0 +1,8 @@
+{
+  "bound_service_account_names": ["database-sa"],
+  "bound_service_account_namespaces": ["database"],
+  "audience": "vault",
+  "policies": ["database"],
+  "token_ttl": "15m",
+  "token_max_ttl": "1h"
+}

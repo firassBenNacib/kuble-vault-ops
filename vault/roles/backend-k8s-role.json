@@ -1,0 +1,8 @@
+{
+  "bound_service_account_names": ["backend-sa"],
+  "bound_service_account_namespaces": ["backend"],
+  "audience": "vault",
+  "policies": ["backend"],
+  "token_ttl": "15m",
+  "token_max_ttl": "1h"
+}

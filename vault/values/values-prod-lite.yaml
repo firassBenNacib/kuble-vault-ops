@@ -1,0 +1,106 @@
+global:
+  enabled: true
+  tlsDisable: false
+  resources:
+    requests:
+      memory: 256Mi
+      cpu: 250m
+    limits:
+      memory: 256Mi
+      cpu: 250m
+
+injector:
+  enabled: false
+
+server:
+  image:
+    repository: "hashicorp/vault"
+    tag: "1.21.0"
+
+  standalone:
+    enabled: false
+
+  ui:
+    enabled: true
+
+  resources:
+    requests:
+      memory: 1Gi
+      cpu: 500m
+    limits:
+      memory: 2Gi
+      cpu: 1000m
+
+  dataStorage:
+    enabled: true
+    size: 2Gi                
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+  auditStorage:
+    enabled: true
+    size: 1Gi
+    storageClass: local-path
+    accessMode: ReadWriteOnce
+
+
+  extraEnvironmentVars:
+    VAULT_CACERT: /vault/userconfig/tls-ca/ca.crt
+
+  extraSecretEnvironmentVars: []
+
+  extraVolumes:
+    - type: secret
+      name: tls-server
+    - type: secret
+      name: tls-ca
+
+  ha:
+    enabled: true
+    replicas: 3
+
+    raft:
+      enabled: true
+      setNodeId: true
+
+      config: |
+        ui = true
+        cluster_name = "vault-cluster"
+
+        service_registration "kubernetes" {}
+
+        listener "tcp" {
+          address         = "[::]:8200"
+          cluster_address = "[::]:8201"
+          tls_cert_file   = "/vault/userconfig/tls-server/tls.crt"
+          tls_key_file    = "/vault/userconfig/tls-server/tls.key"
+        }
+
+        storage "raft" {
+          path = "/vault/data"
+
+          retry_join {
+            leader_api_addr         = "https://vault-0.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/tls-ca/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/tls-server/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/tls-server/tls.key"
+          }
+          retry_join {
+            leader_api_addr         = "https://vault-1.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/tls-ca/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/tls-server/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/tls-server/tls.key"
+          }
+          retry_join {
+            leader_api_addr         = "https://vault-2.vault-internal:8200"
+            leader_ca_cert_file     = "/vault/userconfig/tls-ca/ca.crt"
+            leader_client_cert_file = "/vault/userconfig/tls-server/tls.crt"
+            leader_client_key_file  = "/vault/userconfig/tls-server/tls.key"
+          }
+        }
+
+ui:
+  enabled: true
+  serviceType: "LoadBalancer"
+  serviceNodePort: null
+  externalPort: 8200
