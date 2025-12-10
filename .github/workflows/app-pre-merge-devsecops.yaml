@@ -44,3 +44,22 @@ jobs:
       - name: Angular build
         if: hashFiles('angular.json') != ''
         run: npm run build -- --configuration=production
+
+      - name: Install Semgrep
+        run: pip install semgrep
+
+      - name: Trunk Code Quality
+        if: hashFiles('.trunk/trunk.yaml') != ''
+        uses: trunk-io/trunk-action@v1
+        with:
+          check-mode: all
+          
+      - name: Semgrep SAST
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          if [ -n "$SEMGREP_APP_TOKEN" ]; then
+            semgrep ci --config auto
+          else
+            semgrep ci --config p/ci
+          fi
