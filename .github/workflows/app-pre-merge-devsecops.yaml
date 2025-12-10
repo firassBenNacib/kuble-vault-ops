@@ -53,7 +53,7 @@ jobs:
         uses: trunk-io/trunk-action@v1
         with:
           check-mode: all
-          
+
       - name: Semgrep SAST
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
@@ -63,3 +63,18 @@ jobs:
           else
             semgrep ci --config p/ci
           fi
+      - name: Trivy repo scan (vuln + config + secrets)
+        uses: aquasecurity/trivy-action@v0.33.1
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,config,secret
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+
+      - name: Gitleaks secrets scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
