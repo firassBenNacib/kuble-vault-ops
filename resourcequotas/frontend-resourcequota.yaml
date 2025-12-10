@@ -5,10 +5,10 @@ metadata:
   namespace: frontend
 spec:
   hard:
-    requests.cpu: "1.5"
-    requests.memory: "3Gi"
-    limits.cpu: "3"
-    limits.memory: "6Gi"
+    requests.cpu: "1"
+    requests.memory: "2Gi"
+    limits.cpu: "2"
+    limits.memory: "4Gi"
     pods: "10"
     services: "4"
     configmaps: "3"

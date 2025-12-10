@@ -5,13 +5,12 @@ metadata:
   namespace: vault
 spec:
   hard:
-    requests.cpu: "4"
+    requests.cpu: "3"
     requests.memory: "6Gi"
-    limits.cpu: "6"
-    limits.memory: "12Gi"
+    limits.cpu: "5"
+    limits.memory: "10Gi"
     pods: "6"
     services: "3"
     configmaps: "5"
     secrets: "5"
     persistentvolumeclaims: "6"
-

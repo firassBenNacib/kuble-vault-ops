@@ -5,10 +5,10 @@ metadata:
   namespace: database
 spec:
   hard:
-    requests.cpu: "2"
-    requests.memory: "4Gi"
-    limits.cpu: "4"
-    limits.memory: "8Gi"
+    requests.cpu: "1"
+    requests.memory: "2Gi"
+    limits.cpu: "2"
+    limits.memory: "4Gi"
     pods: "5"
     services: "3"
     configmaps: "3"
