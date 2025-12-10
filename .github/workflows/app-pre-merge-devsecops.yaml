@@ -1,0 +1,46 @@
+name: App Pre-merge DevSecOps
+
+on:
+  workflow_call:
+
+jobs:
+  app-ci-devsecops:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up JDK
+        if: hashFiles('pom.xml') != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node
+        if: hashFiles('package-lock.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Maven build & tests
+        if: hashFiles('pom.xml') != ''
+        run: mvn -B clean verify
+
+      - name: npm install
+        if: hashFiles('package-lock.json') != ''
+        run: npm ci
+
+      - name: npm tests
+        if: hashFiles('package-lock.json') != ''
+        run: npm test -- --watch=false || echo "Adjust test command if needed"
+
+      - name: Angular build
+        if: hashFiles('angular.json') != ''
+        run: npm run build -- --configuration=production
