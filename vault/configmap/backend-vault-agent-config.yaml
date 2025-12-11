@@ -40,6 +40,6 @@ data:
 
   database-creds.tpl: |
     {{- with secret "database/creds/backend-role" -}}
-    SPRING_DATASOURCE_USERNAME={{ .Data.username }}
-    SPRING_DATASOURCE_PASSWORD={{ .Data.password }}
+    DB_USR={{ .Data.username }}
+    DB_PW={{ .Data.password }}
     {{- end }}

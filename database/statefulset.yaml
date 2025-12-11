@@ -104,7 +104,7 @@ spec:
                     . /vault/secrets/mysql-env
                     set +a
                   fi
-                  mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD"
+                  mysqladmin ping -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PW"
             initialDelaySeconds: 30
             periodSeconds: 10
             timeoutSeconds: 5
@@ -120,7 +120,7 @@ spec:
                     . /vault/secrets/mysql-env
                     set +a
                   fi
-                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'SELECT 1;'
+                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PW" -e 'SELECT 1;'
             initialDelaySeconds: 90
             periodSeconds: 15
             timeoutSeconds: 5
@@ -136,7 +136,7 @@ spec:
                     . /vault/secrets/mysql-env
                     set +a
                   fi
-                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'SELECT 1;'
+                  mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PW" -e 'SELECT 1;'
             periodSeconds: 10
             failureThreshold: 30
 

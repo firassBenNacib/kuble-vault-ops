@@ -41,7 +41,7 @@ data:
 
   mysql-env.tpl: |
     {{- with secret "kv/data/database/mysql" -}}
-    MYSQL_ROOT_PASSWORD={{ .Data.data.MYSQL_ROOT_PASSWORD }}
-    MYSQL_USER={{ .Data.data.MYSQL_USER }}
-    MYSQL_PASSWORD={{ .Data.data.MYSQL_PASSWORD }}
+    MYSQL_ROOT_PW={{ .Data.data.MYSQL_ROOT_PASSWORD }}
+    MYSQL_USR={{ .Data.data.MYSQL_USER }}
+    MYSQL_PW={{ .Data.data.MYSQL_PASSWORD }}
     {{- end }}
