@@ -1,0 +1,38 @@
+name: K8s Manifests Security
+
+on:
+  push:
+    branches: [ main, pipeline ]
+    paths:
+      - 'KubleOp-local/**'
+      - '.github/workflows/k8s-manifest-security.yml'
+  pull_request:
+    branches: [ main, pipeline ]
+    paths:
+      - 'KubleOp-local/**'
+      - '.github/workflows/k8s-manifest-security.yml'
+
+env:
+  MANIFEST_DIR: KubleOp-local
+
+jobs:
+  k8s-manifest-security:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: "Trivy scan (K8s manifests: misconfig + secrets)"
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: fs
+          scan-ref: ${{ env.MANIFEST_DIR }}
+          scanners: misconfig,secret
+          format: table
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+          exit-code: "1"
