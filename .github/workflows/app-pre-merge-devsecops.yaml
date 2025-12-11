@@ -63,7 +63,7 @@ jobs:
           else
             semgrep ci --config p/ci
           fi
-      - name: Trivy repo scan (vuln + config + secrets)
+      - name: Trivy scan
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs

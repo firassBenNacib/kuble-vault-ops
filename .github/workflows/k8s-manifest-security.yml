@@ -28,12 +28,12 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: "Trivy scan (K8s manifests: misconfig + secrets)"
+      - name: Trivy scan
         uses: aquasecurity/trivy-action@0.33.1
         with:
           scan-type: fs
           scan-ref: ${{ env.MANIFEST_DIR }}
-          scanners: misconfig,secret
+          scanners: vuln,misconfig,secret
           format: table
           ignore-unfixed: true
           severity: CRITICAL,HIGH
