@@ -88,7 +88,8 @@ jobs:
           outputFile: kubescape-results
           severityThreshold: critical
 
-      - name: Upload Kubescape SARIF to GitHub Security
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Upload Kubescape SARIF artifact
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: kubescape-results.sarif
+          name: kubescape-sarif
+          path: kubescape-results.sarif
