@@ -75,4 +75,6 @@ jobs:
             -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone/{{.ResourceKind}}.json' \
             -ignore-filename-pattern '(^|/)vault/roles/' \
             -ignore-filename-pattern '(^|/)vault/values/' \
+            -ignore-filename-pattern '(^|/)\.github/' \
+            -ignore-filename-pattern '(^|/)trivy-sbom-.*\.cdx\.json$' \
             "${MANIFEST_DIR}"
