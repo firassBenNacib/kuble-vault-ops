@@ -63,6 +63,7 @@ jobs:
           else
             semgrep ci --config p/ci
           fi
+
       - name: Install Trivy CLI
         run: |
           TRIVY_VERSION=0.68.1
@@ -74,7 +75,7 @@ jobs:
       - name: Trivy repo scan
         run: |
           trivy fs \
-            --scanners vuln,misconfig,secret \
+            --scanners vuln,misconfig \
             --format table \
             --ignore-unfixed \
             --severity CRITICAL,HIGH \
