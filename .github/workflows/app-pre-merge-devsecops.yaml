@@ -9,9 +9,10 @@ jobs:
 
     permissions:
       contents: read
+      security-events: write
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up JDK
@@ -22,12 +23,18 @@ jobs:
           java-version: "21"
           cache: maven
 
-      - name: Set up Node
+      - name: Set up Node.js
         if: hashFiles('package-lock.json') != ''
         uses: actions/setup-node@v4
         with:
           node-version: "20"
           cache: npm
+
+      - name: Trunk Code Quality
+        if: hashFiles('.trunk/trunk.yaml') != ''
+        uses: trunk-io/trunk-action@v1
+        with:
+          check-mode: all
 
       - name: Maven build & tests
         if: hashFiles('pom.xml') != ''
@@ -47,12 +54,6 @@ jobs:
 
       - name: Install Semgrep
         run: pip install semgrep
-
-      - name: Trunk Code Quality
-        if: hashFiles('.trunk/trunk.yaml') != ''
-        uses: trunk-io/trunk-action@v1
-        with:
-          check-mode: all
 
       - name: Semgrep SAST
         env:
@@ -75,12 +76,28 @@ jobs:
       - name: Trivy repo scan
         run: |
           trivy fs \
-            --scanners vuln,misconfig \
+            --scanners vuln,misconfig,secret \
             --format table \
             --ignore-unfixed \
             --severity CRITICAL,HIGH \
             --exit-code 1 \
             .
+
+      - name: Generate application SBOM in CycloneDX format
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --format cyclonedx \
+            --output app-sbom.cdx.json \
+            --ignore-unfixed \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            .
+
+      - name: Upload application SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-sbom
+          path: app-sbom.cdx.json
 
       - name: Gitleaks secrets scan
         uses: gitleaks/gitleaks-action@v2

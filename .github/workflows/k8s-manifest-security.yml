@@ -47,7 +47,7 @@ jobs:
             --exit-code 1 \
             "${MANIFEST_DIR}"
 
-      - name: Generate SBOM
+      - name: Generate SBOM in CycloneDX format
         run: |
           trivy fs \
             --scanners vuln \
