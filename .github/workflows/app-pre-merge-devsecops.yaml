@@ -63,16 +63,23 @@ jobs:
           else
             semgrep ci --config p/ci
           fi
-      - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig,secret
-          format: table
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
-          exit-code: "1"
+      - name: Install Trivy CLI
+        run: |
+          TRIVY_VERSION=0.68.1
+          wget -q https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+          tar zxvf trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+          sudo mv trivy /usr/local/bin/trivy
+          trivy --version
+
+      - name: Trivy repo scan (vuln + misconfig + secrets)
+        run: |
+          trivy fs \
+            --scanners vuln,misconfig,secret \
+            --format table \
+            --ignore-unfixed \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            .
 
       - name: Gitleaks secrets scan
         uses: gitleaks/gitleaks-action@v2

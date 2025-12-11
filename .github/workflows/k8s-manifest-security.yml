@@ -28,13 +28,21 @@ jobs:
       - name: Checkout repo
         uses: actions/checkout@v4
 
+      - name: Install Trivy CLI
+        run: |
+          TRIVY_VERSION=0.68.1
+          wget -q https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+          tar zxvf trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+          sudo mv trivy /usr/local/bin/trivy
+          trivy --version
+
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@0.33.1
-        with:
-          scan-type: fs
-          scan-ref: ${{ env.MANIFEST_DIR }}
-          scanners: vuln,misconfig,secret
-          format: table
-          ignore-unfixed: true
-          severity: CRITICAL,HIGH
-          exit-code: "1"
+        run: |
+          trivy fs \
+            --scanners misconfig,secret \
+            --format table \
+            --ignore-unfixed \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            "${MANIFEST_DIR}"
+

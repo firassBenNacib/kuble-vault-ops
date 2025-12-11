@@ -40,7 +40,7 @@ spec:
         - name: docker-secret
       containers:
         - name: frontend
-          image: firasbnc/front_vaccinationapp-dev:latest
+          image: <your-repo>/<your-image>:<your-tag>
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
