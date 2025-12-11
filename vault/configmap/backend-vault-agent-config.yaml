@@ -9,10 +9,11 @@ data:
     pid_file = "/home/vault/.pid"
 
     vault {
-      address        = "https://vault.vault.svc:8200"
-      ca_cert        = "/vault/ca/vault.ca"
+      address         = "https://vault.vault.svc:8200"
+      ca_cert         = "/vault/ca/vault.ca"
       tls_server_name = "vault-0.vault-internal"
     }
+
     auto_auth {
       method "kubernetes" {
         mount_path = "auth/kubernetes"
@@ -40,6 +41,6 @@ data:
 
   database-creds.tpl: |
     {{- with secret "database/creds/backend-role" -}}
-    DB_USR={{ .Data.username }}
-    DB_PW={{ .Data.password }}
+    VAL_DB_USER={{ .Data.username }}
+    VAL_DB_CRED={{ .Data.password }}
     {{- end }}
