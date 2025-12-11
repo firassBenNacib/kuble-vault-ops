@@ -36,7 +36,7 @@ jobs:
           sudo mv trivy /usr/local/bin/trivy
           trivy --version
 
-      - name: Trivy scan
+      - name: Trivy scan 
         run: |
           trivy fs \
             --scanners misconfig,secret \
@@ -46,3 +46,18 @@ jobs:
             --exit-code 1 \
             "${MANIFEST_DIR}"
 
+      - name: Generate SBOM
+        run: |
+          trivy fs \
+            --scanners vuln \
+            --format cyclonedx \
+            --output trivy-sbom-k8s.cdx.json \
+            --ignore-unfixed \
+            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
+            "${MANIFEST_DIR}"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-sbom-k8s
+          path: trivy-sbom-k8s.cdx.json
