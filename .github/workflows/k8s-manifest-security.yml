@@ -23,6 +23,7 @@ jobs:
 
     permissions:
       contents: read
+      security-events: write 
 
     steps:
       - name: Checkout repo
@@ -78,3 +79,15 @@ jobs:
             -ignore-filename-pattern '(^|/)\.github/' \
             -ignore-filename-pattern '(^|/)trivy-sbom-.*\.cdx\.json$' \
             "${MANIFEST_DIR}"
+
+      - name: Kubescape scan
+        uses: kubescape/github-action@v3.0.21
+        with:
+          files: "**/*.yaml"     
+          format: sarif
+          outputFile: kubescape-results
+
+      - name: Upload Kubescape SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: kubescape-results.sarif
