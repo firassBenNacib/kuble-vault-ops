@@ -61,3 +61,16 @@ jobs:
         with:
           name: trivy-sbom-k8s
           path: trivy-sbom-k8s.cdx.json
+
+      - name: Setup kubeconform
+        uses: bmuschko/setup-kubeconform@v1.0.0
+
+      - name: Run kubeconform validation
+        run: |
+          kubeconform \
+            -summary \
+            -strict \
+            -ignore-missing-schemas \
+            -schema-location default \
+            -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone/{{.ResourceKind}}.json' \
+            -recursive "${MANIFEST_DIR}"
