@@ -4,16 +4,19 @@ on:
   push:
     branches: [ main, pipeline ]
     paths:
-      - 'kuble-vault-ops/**'
+      - '**/*.yaml'
+      - '**/*.yml'
       - '.github/workflows/k8s-manifest-security.yml'
   pull_request:
     branches: [ main, pipeline ]
     paths:
-      - 'kuble-vault-ops/**'
+      - '**/*.yaml'
+      - '**/*.yml'
       - '.github/workflows/k8s-manifest-security.yml'
 
 env:
-  MANIFEST_DIR: kuble-vault-ops
+  MANIFEST_DIR: .
+
 jobs:
   k8s-manifest-security:
     runs-on: ubuntu-latest
