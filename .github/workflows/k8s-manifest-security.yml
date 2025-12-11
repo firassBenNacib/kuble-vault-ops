@@ -73,4 +73,6 @@ jobs:
             -ignore-missing-schemas \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone/{{.ResourceKind}}.json' \
+            -ignore-filename-pattern '(^|/)vault/roles/' \
+            -ignore-filename-pattern '(^|/)vault/values/' \
             "${MANIFEST_DIR}"
