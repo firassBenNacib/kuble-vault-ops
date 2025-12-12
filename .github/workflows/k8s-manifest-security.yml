@@ -77,21 +77,21 @@ jobs:
 
       - name: Upload Trivy secrets SARIF to code scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-secrets.sarif
           category: trivy-secrets
 
       - name: Upload Trivy misconfig SARIF to code scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-misconfig.sarif
           category: trivy-misconfig
 
       - name: Upload Trivy config SARIF to code scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-config.sarif
           category: trivy-config
@@ -167,10 +167,20 @@ jobs:
 
       - name: Upload Kubescape SARIF to code scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: kubescape-results.sarif
           category: kubescape
+
+      - name: Install Vault CLI
+        run: |
+          VAULT_VERSION=1.18.4
+          sudo apt-get update -y
+          sudo apt-get install -y unzip
+          wget -q https://releases.hashicorp.com/vault/${VAULT_VERSION}/vault_${VAULT_VERSION}_linux_amd64.zip
+          unzip vault_${VAULT_VERSION}_linux_amd64.zip
+          sudo mv vault /usr/local/bin/vault
+          vault --version
 
       - name: Validate Vault policies
         run: |
@@ -178,10 +188,7 @@ jobs:
             for policy in vault/policies/*.hcl; do
               if [ -f "$policy" ]; then
                 echo "Validating $policy"
-                if ! grep -E 'path.*{|capabilities.*=.*\[' "$policy" > /dev/null; then
-                  echo "::error::Invalid Vault policy format in $policy"
-                  exit 1
-                fi
+                vault policy fmt "$policy"
               fi
             done
           else
@@ -238,7 +245,7 @@ jobs:
 
       - name: Upload Checkov SARIF to code scanning
         if: always()
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: checkov-results.sarif
           category: checkov
