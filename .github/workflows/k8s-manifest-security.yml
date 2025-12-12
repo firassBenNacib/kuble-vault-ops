@@ -152,7 +152,7 @@ jobs:
         with:
           files: "**/*.yaml"
           format: sarif
-          outputFile: kubescape-results
+          outputFile: kubescape-results.sarif
           severityThreshold: high
           frameworks: |
             nsa,mitre,armobest
@@ -235,19 +235,27 @@ jobs:
           done
 
       - name: Run Checkov
-        uses: bridgecrewio/checkov-action@master
+        uses: bridgecrewio/checkov-action@v12
         with:
           directory: .
           framework: kubernetes
           output_format: sarif
-          output_file_path: checkov-results.sarif
+          output_file_path: reports
           skip_framework: dockerfile
+
+      - name: Upload Checkov SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-sarif-${{ github.run_number }}
+          path: reports/results.sarif
+          retention-days: 90
 
       - name: Upload Checkov SARIF to code scanning
         if: always()
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: checkov-results.sarif
+          sarif_file: reports/results.sarif
           category: checkov
 
       - name: Run kube-score
