@@ -67,9 +67,9 @@ jobs:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
           if [ -n "$SEMGREP_APP_TOKEN" ]; then
-            semgrep ci --config auto
+            semgrep ci
           else
-            semgrep ci --config p/ci
+            semgrep scan --config p/ci
           fi
 
       - name: SonarQube analysis
@@ -134,8 +134,8 @@ jobs:
         if: hashFiles('backend/Dockerfile') != ''
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
-          file: ./backend/Dockerfile
+          context: .
+          file: ./Dockerfile
           push: false
           load: true
           tags: |
@@ -146,8 +146,8 @@ jobs:
         if: hashFiles('frontend/Dockerfile') != ''
         uses: docker/build-push-action@v6
         with:
-          context: ./frontend
-          file: ./frontend/Dockerfile
+          context: .
+          file: ./Dockerfile
           push: false
           load: true
           tags: |
@@ -223,10 +223,16 @@ jobs:
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
 
-      - name: Upload image SBOM artifacts
+      - name: Upload backend image SBOM artifact
+        if: hashFiles('backend/Dockerfile') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: image-sboms
-          path: |
-            backend-image-sbom.cdx.json
-            frontend-image-sbom.cdx.json
+          name: backend-image-sbom
+          path: backend-image-sbom.cdx.json
+
+      - name: Upload frontend image SBOM artifact
+        if: hashFiles('frontend/Dockerfile') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-image-sbom
+          path: frontend-image-sbom.cdx.json
