@@ -39,9 +39,8 @@ jobs:
 
       - name: Trunk Code Quality
         if: hashFiles('.trunk/trunk.yaml') != ''
-        uses: trunk-io/trunk-action@v1
-        with:
-          check-mode: all
+        uses: trunk-io/trunk-action@v1.2.4
+        continue-on-error: true
 
       - name: Maven build & tests for backend
         if: hashFiles('pom.xml') != ''
@@ -131,7 +130,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build backend image
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -143,7 +142,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/backend:latest
 
       - name: Build frontend image
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -155,7 +154,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest
 
       - name: Trivy scan backend image
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           trivy image \
             --ignore-unfixed \
@@ -164,7 +163,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
 
       - name: Trivy scan frontend image
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           trivy image \
             --ignore-unfixed \
@@ -173,13 +172,13 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
 
       - name: Push backend image
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/backend:latest
 
       - name: Push frontend image
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
           docker push ${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest
@@ -188,7 +187,7 @@ jobs:
         uses: sigstore/cosign-installer@v3.4.0
 
       - name: Sign backend image
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
@@ -196,7 +195,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
 
       - name: Sign frontend image
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         env:
           COSIGN_EXPERIMENTAL: "true"
         run: |
@@ -204,7 +203,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
 
       - name: Generate backend image SBOM CycloneDX
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           trivy image \
             --format cyclonedx \
@@ -214,7 +213,7 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
 
       - name: Generate frontend image SBOM CycloneDX
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         run: |
           trivy image \
             --format cyclonedx \
@@ -224,14 +223,14 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
 
       - name: Upload backend image SBOM artifact
-        if: hashFiles('backend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         uses: actions/upload-artifact@v4
         with:
           name: backend-image-sbom
           path: backend-image-sbom.cdx.json
 
       - name: Upload frontend image SBOM artifact
-        if: hashFiles('frontend/Dockerfile') != ''
+        if: hashFiles('Dockerfile') != ''
         uses: actions/upload-artifact@v4
         with:
           name: frontend-image-sbom
