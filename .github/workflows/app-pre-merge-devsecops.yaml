@@ -40,7 +40,6 @@ jobs:
       - name: Trunk Code Quality
         if: hashFiles('.trunk/trunk.yaml') != ''
         uses: trunk-io/trunk-action@v1.2.4
-        continue-on-error: true
 
       - name: Maven build & tests for backend
         if: hashFiles('pom.xml') != ''
