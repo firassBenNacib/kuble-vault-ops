@@ -75,13 +75,34 @@ jobs:
             "${MANIFEST_DIR}"
         continue-on-error: true
 
+      - name: Upload Trivy secrets SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
+
+      - name: Upload Trivy misconfig SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-misconfig.sarif
+          category: trivy-misconfig
+
+      - name: Upload Trivy config SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
       - name: Generate SBOM in CycloneDX format
         if: always()
         run: |
           trivy fs \
+            --scanners vuln \
             --format cyclonedx \
             --output trivy-sbom-k8s.cdx.json \
-            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             "${MANIFEST_DIR}"
 
       - name: Upload Trivy SBOM artifact
@@ -91,24 +112,6 @@ jobs:
           name: trivy-sbom-k8s-${{ github.run_number }}
           path: trivy-sbom-k8s.cdx.json
           retention-days: 90
-
-      - name: Merge Trivy SARIF files
-        if: always()
-        run: |
-          jq -s '
-            {
-              "$schema": .[0]["$schema"],
-              "version": .[0].version,
-              "runs": [.[].runs[]]
-            }
-          ' trivy-*.sarif > trivy-combined.sarif
-
-      - name: Upload Trivy SARIF to code scanning
-        if: always()
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-combined.sarif
-          category: trivy
 
       - name: Setup kubeconform
         uses: bmuschko/setup-kubeconform@v1.0.0
