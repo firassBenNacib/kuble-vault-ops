@@ -6,12 +6,14 @@ on:
     paths:
       - '**/*.yaml'
       - '**/*.yml'
+      - '!.github/**'
       - '.github/workflows/k8s-manifest-security.yml'
   pull_request:
     branches: [ main, pipeline ]
     paths:
       - '**/*.yaml'
       - '**/*.yml'
+      - '!.github/**'
       - '.github/workflows/k8s-manifest-security.yml'
 
 env:
@@ -20,10 +22,12 @@ env:
 jobs:
   k8s-manifest-security:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     permissions:
       contents: read
       security-events: write
+      actions: read
 
     steps:
       - name: Checkout repo
@@ -37,31 +41,74 @@ jobs:
           sudo mv trivy /usr/local/bin/trivy
           trivy --version
 
-      - name: Trivy scan
+      - name: Trivy secret scan
         run: |
           trivy fs \
-            --scanners misconfig,secret \
-            --format table \
+            --scanners secret \
+            --skip-dirs .git --skip-dirs .github \
+            --format sarif \
+            --output trivy-secrets.sarif \
+            --exit-code 1 \
+            "${MANIFEST_DIR}"
+        continue-on-error: false
+
+      - name: Trivy misconfig scan
+        run: |
+          trivy fs \
+            --scanners misconfig \
+            --skip-dirs .git --skip-dirs .github \
+            --format sarif \
+            --output trivy-misconfig.sarif \
             --ignore-unfixed \
             --severity CRITICAL,HIGH \
             --exit-code 1 \
             "${MANIFEST_DIR}"
+        continue-on-error: false
+
+      - name: Trivy IaC config scan
+        run: |
+          trivy config \
+            --format sarif \
+            --output trivy-config.sarif \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            "${MANIFEST_DIR}"
+        continue-on-error: true
 
       - name: Generate SBOM in CycloneDX format
+        if: always()
         run: |
           trivy fs \
-            --scanners vuln \
             --format cyclonedx \
             --output trivy-sbom-k8s.cdx.json \
-            --ignore-unfixed \
             --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
             "${MANIFEST_DIR}"
 
-      - name: Upload SBOM artifact
+      - name: Upload Trivy SBOM artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-sbom-k8s
+          name: trivy-sbom-k8s-${{ github.run_number }}
           path: trivy-sbom-k8s.cdx.json
+          retention-days: 90
+
+      - name: Merge Trivy SARIF files
+        if: always()
+        run: |
+          jq -s '
+            {
+              "$schema": .[0]["$schema"],
+              "version": .[0].version,
+              "runs": [.[].runs[]]
+            }
+          ' trivy-*.sarif > trivy-combined.sarif
+
+      - name: Upload Trivy SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-combined.sarif
+          category: trivy
 
       - name: Setup kubeconform
         uses: bmuschko/setup-kubeconform@v1.0.0
@@ -72,24 +119,129 @@ jobs:
             -summary \
             -strict \
             -ignore-missing-schemas \
+            -output json \
             -schema-location default \
             -schema-location 'https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/{{.NormalizedKubernetesVersion}}-standalone/{{.ResourceKind}}.json' \
             -ignore-filename-pattern '(^|/)vault/roles/' \
+            -ignore-filename-pattern '(^|/)vault/policies/' \
             -ignore-filename-pattern '(^|/)vault/values/' \
             -ignore-filename-pattern '(^|/)\.github/' \
-            -ignore-filename-pattern '(^|/)trivy-sbom-.*\.cdx\.json$' \
-            "${MANIFEST_DIR}"
+            -ignore-filename-pattern 'trivy-.*\.json$' \
+            "${MANIFEST_DIR}" | tee kubeconform-results.json
+
+          ERRORS=$(jq '.summary.invalid' kubeconform-results.json)
+          if [ "$ERRORS" -gt 0 ]; then
+            echo "::error::Kubeconform found $ERRORS invalid manifests"
+            exit 1
+          fi
+
+      - name: Upload kubeconform results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubeconform-results-${{ github.run_number }}
+          path: kubeconform-results.json
+          retention-days: 30
 
       - name: Kubescape scan
         uses: kubescape/github-action@v3.0.21
+        continue-on-error: false
         with:
           files: "**/*.yaml"
           format: sarif
           outputFile: kubescape-results
-          severityThreshold: critical
+          severityThreshold: high
+          frameworks: |
+            nsa,mitre,armobest
 
       - name: Upload Kubescape SARIF artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kubescape-sarif
+          name: kubescape-sarif-${{ github.run_number }}
           path: kubescape-results.sarif
+          retention-days: 90
+
+      - name: Upload Kubescape SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: kubescape-results.sarif
+          category: kubescape
+
+      - name: Validate Vault policies
+        run: |
+          if [ -d vault/policies ]; then
+            for policy in vault/policies/*.hcl; do
+              if [ -f "$policy" ]; then
+                echo "Validating $policy"
+                if ! grep -E 'path.*{|capabilities.*=.*\[' "$policy" > /dev/null; then
+                  echo "::error::Invalid Vault policy format in $policy"
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No vault/policies directory found, skipping Vault policy validation."
+          fi
+        continue-on-error: false
+
+      - name: Check for anti-patterns
+        run: |
+          if grep -R "privileged: true" --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
+            echo "::error::Found privileged containers - this is a security risk"
+            exit 1
+          fi
+
+          if grep -R -E "host(Network|PID|IPC): true" --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
+            echo "::warning::Found host namespace usage - review for necessity"
+          fi
+
+          if grep -R 'namespace: default' --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
+            echo "::warning::Found resources in default namespace"
+          fi
+
+          echo "Anti-pattern check complete"
+
+      - name: Check network policy coverage
+        run: |
+          NAMESPACES=$(grep -R "kind: Namespace" --include="*.yaml" -A 3 "${MANIFEST_DIR}" | grep "name:" | awk '{print $2}' | sort -u || true)
+
+          for ns in $NAMESPACES; do
+            if [ "$ns" = "kube-system" ] || [ "$ns" = "metallb-system" ]; then
+              continue
+            fi
+
+            if [ -d networkpolicies ]; then
+              if ! find networkpolicies -name "*-np.yaml" -path "*/$ns/*" | grep -q .; then
+                echo "::warning::Namespace '$ns' may be missing network policies"
+              else
+                echo "Namespace '$ns' has network policies"
+              fi
+            else
+              echo "::warning::networkpolicies directory not found; cannot verify network policy coverage"
+              break
+            fi
+          done
+
+      - name: Run Checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: .
+          framework: kubernetes
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          skip_framework: dockerfile
+
+      - name: Upload Checkov SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov
+
+      - name: Run kube-score
+        run: |
+          wget https://github.com/zegl/kube-score/releases/download/v1.18.0/kube-score_1.18.0_linux_amd64 -O kube-score
+          chmod +x kube-score
+          find "${MANIFEST_DIR}" -name '*.yaml' -print0 | xargs -0 ./kube-score score --output-format ci
