@@ -3,9 +3,10 @@ kind: NetworkPolicy
 metadata:
   name: default-deny-all
   namespace: vault
+  annotations:
+    kube-score/ignore: networkpolicy-targets-pod
 spec:
   podSelector: {}
   policyTypes:
     - Ingress
     - Egress
-

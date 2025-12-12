@@ -8,6 +8,7 @@ metadata:
   annotations:
     checkov.io/skip1: CKV_K8S_43
     checkov.io/skip2: CKV_K8S_40=MySQL official image expects uid/gid 999
+    kube-score/ignore: container-security-context-user-group-id
 spec:
   serviceName: mysql
   replicas: 1
@@ -55,7 +56,6 @@ spec:
             secretName: vault-ca
       containers:
         - name: mysql
-          # checkov:skip=CKV_K8S_43
           image: mysql:8.4
           imagePullPolicy: Always
           ports:
@@ -98,9 +98,11 @@ spec:
             requests:
               memory: "512Mi"
               cpu: "250m"
+              ephemeral-storage: "256Mi"
             limits:
               memory: "1Gi"
               cpu: "500m"
+              ephemeral-storage: "1Gi"
           readinessProbe:
             exec:
               command:
@@ -182,18 +184,12 @@ spec:
               drop: ["ALL"]
           livenessProbe:
             exec:
-              command:
-                - sh
-                - -c
-                - test -f /vault/secrets || test -f /vault/ca/ca.crt
+              command: ["sh", "-c", "test -s /home/vault/.pid"]
             initialDelaySeconds: 30
             periodSeconds: 30
           readinessProbe:
             exec:
-              command:
-                - sh
-                - -c
-                - test -f /vault/secrets || test -f /vault/ca/ca.crt
+              command: ["sh", "-c", "test -s /home/vault/.vault-token && test -s /vault/secrets/mysql-env"]
             initialDelaySeconds: 10
             periodSeconds: 15
           volumeMounts:
@@ -214,9 +210,11 @@ spec:
             requests:
               cpu: "50m"
               memory: "64Mi"
+              ephemeral-storage: "32Mi"
             limits:
               cpu: "250m"
               memory: "128Mi"
+              ephemeral-storage: "128Mi"
   volumeClaimTemplates:
     - metadata:
         name: mysql-storage
