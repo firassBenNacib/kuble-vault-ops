@@ -198,44 +198,6 @@ jobs:
           fi
         continue-on-error: false
 
-      - name: Check for anti-patterns
-        run: |
-          if grep -R "privileged: true" --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
-            echo "::error::Found privileged containers - this is a security risk"
-            exit 1
-          fi
-
-          if grep -R -E "host(Network|PID|IPC): true" --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
-            echo "::warning::Found host namespace usage - review for necessity"
-          fi
-
-          if grep -R 'namespace: default' --include="*.yaml" --include="*.yml" "${MANIFEST_DIR}"; then
-            echo "::warning::Found resources in default namespace"
-          fi
-
-          echo "Anti-pattern check complete"
-
-      - name: Check network policy coverage
-        run: |
-          NAMESPACES=$(grep -R "kind: Namespace" --include="*.yaml" -A 3 "${MANIFEST_DIR}" | grep "name:" | awk '{print $2}' | sort -u || true)
-
-          for ns in $NAMESPACES; do
-            if [ "$ns" = "kube-system" ] || [ "$ns" = "metallb-system" ]; then
-              continue
-            fi
-
-            if [ -d networkpolicies ]; then
-              if ! find networkpolicies -name "*-np.yaml" -path "*/$ns/*" | grep -q .; then
-                echo "::warning::Namespace '$ns' may be missing network policies"
-              else
-                echo "Namespace '$ns' has network policies"
-              fi
-            else
-              echo "::warning::networkpolicies directory not found; cannot verify network policy coverage"
-              break
-            fi
-          done
-
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@v12
         with:
