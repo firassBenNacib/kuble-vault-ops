@@ -76,21 +76,21 @@ jobs:
         continue-on-error: true
 
       - name: Upload Trivy secrets SARIF to code scanning
-        if: always()
+        if: ${{ always() && hashFiles('trivy-secrets.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-secrets.sarif
           category: trivy-secrets
 
       - name: Upload Trivy misconfig SARIF to code scanning
-        if: always()
+        if: ${{ always() && hashFiles('trivy-misconfig.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-misconfig.sarif
           category: trivy-misconfig
 
       - name: Upload Trivy config SARIF to code scanning
-        if: always()
+        if: ${{ always() && hashFiles('trivy-config.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-config.sarif
@@ -106,7 +106,7 @@ jobs:
             "${MANIFEST_DIR}"
 
       - name: Upload Trivy SBOM artifact
-        if: always()
+        if: ${{ always() && hashFiles('trivy-sbom-k8s.cdx.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: trivy-sbom-k8s-${{ github.run_number }}
@@ -139,7 +139,7 @@ jobs:
           fi
 
       - name: Upload kubeconform results
-        if: always()
+        if: ${{ always() && hashFiles('kubeconform-results.json') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: kubeconform-results-${{ github.run_number }}
@@ -158,7 +158,7 @@ jobs:
             nsa,mitre,armobest
 
       - name: Upload Kubescape SARIF artifact
-        if: always()
+        if: ${{ always() && hashFiles('kubescape-results.sarif') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: kubescape-sarif-${{ github.run_number }}
@@ -166,7 +166,7 @@ jobs:
           retention-days: 90
 
       - name: Upload Kubescape SARIF to code scanning
-        if: always()
+        if: ${{ always() && hashFiles('kubescape-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: kubescape-results.sarif
@@ -204,22 +204,22 @@ jobs:
           directory: .
           framework: kubernetes
           output_format: sarif
-          output_file_path: reports
+          output_file_path: checkov-results.sarif
           skip_framework: dockerfile
 
       - name: Upload Checkov SARIF artifact
-        if: always()
+        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: checkov-sarif-${{ github.run_number }}
-          path: reports/results.sarif
+          path: checkov-results.sarif
           retention-days: 90
 
       - name: Upload Checkov SARIF to code scanning
-        if: always()
+        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: reports/results.sarif
+          sarif_file: checkov-results.sarif
           category: checkov
 
       - name: Run kube-score

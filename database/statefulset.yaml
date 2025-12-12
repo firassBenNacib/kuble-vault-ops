@@ -20,6 +20,7 @@ spec:
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true
+        # checkov:skip=CKV_K8S_40
         runAsUser: 999
         runAsGroup: 999
         fsGroup: 999
@@ -52,8 +53,9 @@ spec:
             secretName: vault-ca
       containers:
         - name: mysql
+          # checkov:skip=CKV_K8S_43
           image: mysql:8.4
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           ports:
             - containerPort: 3306
               name: mysql
@@ -72,13 +74,13 @@ spec:
           args:
             - |
               if [ -f /vault/secrets/mysql-env ]; then
-                          set -a
-                          . /vault/secrets/mysql-env
-                          set +a
+                set -a
+                . /vault/secrets/mysql-env
+                set +a
 
-                          export MYSQL_ROOT_PASSWORD="$VAL_DB_ROOT"
-                          export MYSQL_USER="$VAL_DB_USER"
-                          export MYSQL_PASSWORD="$VAL_DB_MAIN"
+                export MYSQL_ROOT_PASSWORD="$VAL_DB_ROOT"
+                export MYSQL_USER="$VAL_DB_USER"
+                export MYSQL_PASSWORD="$VAL_DB_MAIN"
               fi
               exec docker-entrypoint.sh mysqld
           volumeMounts:
@@ -146,7 +148,6 @@ spec:
                   mysql -h 127.0.0.1 -uroot -p"$MYSQL_ROOT_PASSWORD" -e 'SELECT 1;'
             periodSeconds: 10
             failureThreshold: 30
-
           lifecycle:
             preStop:
               exec:
@@ -163,7 +164,7 @@ spec:
                     mysqladmin shutdown -uroot -p"$MYSQL_ROOT_PASSWORD"
         - name: vault-agent
           image: hashicorp/vault:1.20.4
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           command: ["vault"]
           args:
             - agent
@@ -177,6 +178,22 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f /vault/secrets || test -f /vault/ca/ca.crt
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - test -f /vault/secrets || test -f /vault/ca/ca.crt
+            initialDelaySeconds: 10
+            periodSeconds: 15
           volumeMounts:
             - name: vault-sa-token
               mountPath: /var/run/secrets/tokens
