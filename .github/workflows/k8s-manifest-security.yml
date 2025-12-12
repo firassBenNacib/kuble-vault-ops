@@ -42,7 +42,9 @@ jobs:
           trivy --version
 
       - name: Trivy secret scan
+        id: trivy_secrets
         run: |
+          set +e
           trivy fs \
             --scanners secret \
             --skip-dirs .git --skip-dirs .github \
@@ -50,10 +52,29 @@ jobs:
             --output trivy-secrets.sarif \
             --exit-code 1 \
             "${MANIFEST_DIR}"
-        continue-on-error: false
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trivy secrets SARIF artifact
+        if: ${{ always() && hashFiles('trivy-secrets.sarif') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-secrets-sarif-${{ github.run_number }}
+          path: trivy-secrets.sarif
+          retention-days: 90
+
+      - name: Upload Trivy secrets SARIF to code scanning
+        if: ${{ always() && hashFiles('trivy-secrets.sarif') != '' }}
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
 
       - name: Trivy misconfig scan
+        id: trivy_misconfig
         run: |
+          set +e
           trivy fs \
             --scanners misconfig \
             --skip-dirs .git --skip-dirs .github \
@@ -63,24 +84,17 @@ jobs:
             --severity CRITICAL,HIGH \
             --exit-code 1 \
             "${MANIFEST_DIR}"
-        continue-on-error: false
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
-      - name: Trivy IaC config scan
-        run: |
-          trivy config \
-            --format sarif \
-            --output trivy-config.sarif \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
-            "${MANIFEST_DIR}"
-        continue-on-error: true
-
-      - name: Upload Trivy secrets SARIF to code scanning
-        if: ${{ always() && hashFiles('trivy-secrets.sarif') != '' }}
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Upload Trivy misconfig SARIF artifact
+        if: ${{ always() && hashFiles('trivy-misconfig.sarif') != '' }}
+        uses: actions/upload-artifact@v4
         with:
-          sarif_file: trivy-secrets.sarif
-          category: trivy-secrets
+          name: trivy-misconfig-sarif-${{ github.run_number }}
+          path: trivy-misconfig.sarif
+          retention-days: 90
 
       - name: Upload Trivy misconfig SARIF to code scanning
         if: ${{ always() && hashFiles('trivy-misconfig.sarif') != '' }}
@@ -89,6 +103,28 @@ jobs:
           sarif_file: trivy-misconfig.sarif
           category: trivy-misconfig
 
+      - name: Trivy IaC config scan
+        id: trivy_config
+        run: |
+          set +e
+          trivy config \
+            --format sarif \
+            --output trivy-config.sarif \
+            --severity CRITICAL,HIGH \
+            --exit-code 0 \
+            "${MANIFEST_DIR}"
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Trivy config SARIF artifact
+        if: ${{ always() && hashFiles('trivy-config.sarif') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-config-sarif-${{ github.run_number }}
+          path: trivy-config.sarif
+          retention-days: 90
+
       - name: Upload Trivy config SARIF to code scanning
         if: ${{ always() && hashFiles('trivy-config.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
@@ -96,28 +132,13 @@ jobs:
           sarif_file: trivy-config.sarif
           category: trivy-config
 
-      - name: Generate SBOM in CycloneDX format
-        if: always()
-        run: |
-          trivy fs \
-            --scanners vuln \
-            --format cyclonedx \
-            --output trivy-sbom-k8s.cdx.json \
-            "${MANIFEST_DIR}"
-
-      - name: Upload Trivy SBOM artifact
-        if: ${{ always() && hashFiles('trivy-sbom-k8s.cdx.json') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: trivy-sbom-k8s-${{ github.run_number }}
-          path: trivy-sbom-k8s.cdx.json
-          retention-days: 90
-
       - name: Setup kubeconform
         uses: bmuschko/setup-kubeconform@v1.0.0
 
       - name: Run kubeconform validation
+        id: kubeconform
         run: |
+          set +e
           kubeconform \
             -summary \
             -strict \
@@ -131,12 +152,23 @@ jobs:
             -ignore-filename-pattern '(^|/)\.github/' \
             -ignore-filename-pattern 'trivy-.*\.json$' \
             "${MANIFEST_DIR}" | tee kubeconform-results.json
+          cmd_exit=$?
+          set -e
 
-          ERRORS=$(jq '.summary.invalid' kubeconform-results.json)
-          if [ "$ERRORS" -gt 0 ]; then
-            echo "::error::Kubeconform found $ERRORS invalid manifests"
-            exit 1
+          if command -v jq >/dev/null 2>&1; then
+            invalid=$(jq '.summary.invalid // 0' kubeconform-results.json || echo 0)
+          else
+            echo "jq not found, assuming 0 invalid manifests"
+            invalid=0
           fi
+
+          exit_code=$cmd_exit
+          if [ "$invalid" -gt 0 ]; then
+            exit_code=1
+          fi
+
+          echo "invalid=$invalid"
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
       - name: Upload kubeconform results
         if: ${{ always() && hashFiles('kubeconform-results.json') != '' }}
@@ -147,8 +179,9 @@ jobs:
           retention-days: 30
 
       - name: Kubescape scan
+        id: kubescape
         uses: kubescape/github-action@v3.0.21
-        continue-on-error: false
+        continue-on-error: true
         with:
           files: "**/*.yaml"
           format: sarif
@@ -185,45 +218,105 @@ jobs:
           vault --version
 
       - name: Validate Vault policies
+        id: vault_policies
         run: |
+          set +e
+          exit_code=0
           if [ -d vault/policies ]; then
             for policy in vault/policies/*.hcl; do
               if [ -f "$policy" ]; then
                 echo "Validating $policy"
                 vault policy fmt "$policy"
+                rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  exit_code=$rc
+                fi
               fi
             done
           else
             echo "No vault/policies directory found, skipping Vault policy validation."
           fi
-        continue-on-error: false
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
 
       - name: Run Checkov
+        id: checkov
         uses: bridgecrewio/checkov-action@v12
+        continue-on-error: true
         with:
           directory: .
           framework: kubernetes
           output_format: sarif
-          output_file_path: checkov-results.sarif
+          output_file_path: reports
           skip_framework: dockerfile
 
       - name: Upload Checkov SARIF artifact
-        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
+        if: ${{ always() && hashFiles('reports/results.sarif') != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: checkov-sarif-${{ github.run_number }}
-          path: checkov-results.sarif
+          path: reports/results.sarif
           retention-days: 90
 
       - name: Upload Checkov SARIF to code scanning
-        if: ${{ always() && hashFiles('checkov-results.sarif') != '' }}
+        if: ${{ always() && hashFiles('reports/results.sarif') != '' }}
         uses: github/codeql-action/upload-sarif@v4
         with:
-          sarif_file: checkov-results.sarif
+          sarif_file: reports/results.sarif
           category: checkov
 
       - name: Run kube-score
+        id: kube_score
         run: |
           wget https://github.com/zegl/kube-score/releases/download/v1.18.0/kube-score_1.18.0_linux_amd64 -O kube-score
           chmod +x kube-score
-          find "${MANIFEST_DIR}" -name '*.yaml' -print0 | xargs -0 ./kube-score score --output-format ci
+          set +e
+          find "${MANIFEST_DIR}" -name '*.yaml' -print0 | xargs -0 ./kube-score score --output-format ci > kube-score-report.txt
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+      - name: Upload kube-score report
+        if: ${{ always() && hashFiles('kube-score-report.txt') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-score-report-${{ github.run_number }}
+          path: kube-score-report.txt
+          retention-days: 30
+
+      - name: Evaluate scan results and fail if needed
+        if: always()
+        env:
+          TRIVY_SECRETS_EXIT: ${{ steps.trivy_secrets.outputs.exit_code }}
+          TRIVY_MISCONFIG_EXIT: ${{ steps.trivy_misconfig.outputs.exit_code }}
+          KUBECONFORM_EXIT: ${{ steps.kubeconform.outputs.exit_code }}
+          KUBESCAPE_OUTCOME: ${{ steps.kubescape.outcome }}
+          CHECKOV_OUTCOME: ${{ steps.checkov.outcome }}
+          KUBE_SCORE_EXIT: ${{ steps.kube_score.outputs.exit_code }}
+          VAULT_EXIT: ${{ steps.vault_policies.outputs.exit_code }}
+        run: |
+          echo "Trivy secrets exit: ${TRIVY_SECRETS_EXIT:-0}"
+          echo "Trivy misconfig exit: ${TRIVY_MISCONFIG_EXIT:-0}"
+          echo "kubeconform exit: ${KUBECONFORM_EXIT:-0}"
+          echo "Kubescape outcome: ${KUBESCAPE_OUTCOME:-unknown}"
+          echo "Checkov outcome: ${CHECKOV_OUTCOME:-unknown}"
+          echo "kube-score exit: ${KUBE_SCORE_EXIT:-0}"
+          echo "Vault policies exit: ${VAULT_EXIT:-0}"
+
+          failures=0
+
+          if [ "${TRIVY_SECRETS_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${TRIVY_MISCONFIG_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${KUBECONFORM_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${VAULT_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${KUBE_SCORE_EXIT:-0}" -ne 0 ]; then failures=1; fi
+
+          if [ "${KUBESCAPE_OUTCOME}" = "failure" ]; then failures=1; fi
+          if [ "${CHECKOV_OUTCOME}" = "failure" ]; then failures=1; fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::One or more security scanners reported failures. See logs and SARIF artifacts for details."
+            exit 1
+          else
+            echo "All security scanners passed configured policy thresholds."
+          fi
