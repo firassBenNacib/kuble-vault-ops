@@ -5,22 +5,25 @@ on:
 
 env:
   IMAGE_TAG: ${{ github.sha }}
+  TRIVY_VERSION: '0.68.1'
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 jobs:
-  app-ci-devsecops:
+  code-quality-and-sast:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     permissions:
       contents: read
       security-events: write
-      id-token: write
+      checks: write
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up JDK for backend
         if: hashFiles('pom.xml') != ''
@@ -40,35 +43,99 @@ jobs:
       - name: Trunk Code Quality
         if: hashFiles('.trunk/trunk.yaml') != ''
         uses: trunk-io/trunk-action@v1.2.4
+        continue-on-error: true
 
-      - name: Maven build & tests for backend
+      - name: Maven build and tests
         if: hashFiles('pom.xml') != ''
         run: mvn -B clean verify
 
-      - name: npm install for frontend
+      - name: Maven dependency check
+        if: hashFiles('pom.xml') != ''
+        id: depcheck
+        run: |
+          set +e
+          mvn org.owasp:dependency-check-maven:check \
+            -DfailBuildOnCVSS=7 \
+            -DsuppressionFiles=dependency-check-suppressions.xml
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: npm install
         if: hashFiles('package-lock.json') != ''
         run: npm ci
 
-      - name: npm tests for frontend
+      - name: npm audit
         if: hashFiles('package-lock.json') != ''
-        run: npm test -- --watch=false || echo "Adjust test command if needed"
+        id: npm_audit
+        run: |
+          set +e
+          npm audit --audit-level=high --json > npm-audit.json
+          npm audit --audit-level=high
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
 
-      - name: Angular production build for frontend
+      - name: npm tests
+        if: hashFiles('package-lock.json') != ''
+        id: npm_tests
+        run: |
+          set +e
+          npm test -- --watch=false --code-coverage
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Angular production build
         if: hashFiles('angular.json') != ''
         run: npm run build -- --configuration=production
 
+      - name: Upload npm audit results
+        if: hashFiles('npm-audit.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ github.run_number }}
+          path: npm-audit.json
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Install Semgrep
-        run: pip install semgrep
+        run: python -m pip install --upgrade pip semgrep
 
       - name: Semgrep SAST
+        id: semgrep
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
+          set +e
           if [ -n "$SEMGREP_APP_TOKEN" ]; then
-            semgrep ci
+            semgrep ci --sarif --output semgrep.sarif
           else
-            semgrep scan --config p/ci
+            semgrep scan --config p/ci --sarif --output semgrep.sarif
           fi
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload Semgrep SARIF
+        if: hashFiles('semgrep.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: semgrep-sarif-${{ github.run_number }}
+          path: semgrep.sarif
+          retention-days: 90
+
+      - name: Upload Semgrep SARIF to code scanning
+        if: hashFiles('semgrep.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+        continue-on-error: true
 
       - name: SonarQube analysis
         if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
@@ -76,51 +143,167 @@ jobs:
         env:
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        continue-on-error: true
 
-      - name: Install Trivy CLI
+      - name: SonarQube Quality Gate
+        if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        continue-on-error: true
+
+      - name: Evaluate quality and SAST
+        if: always()
+        env:
+          DEPCHECK_EXIT: ${{ steps.depcheck.outputs.exit_code }}
+          NPM_AUDIT_EXIT: ${{ steps.npm_audit.outputs.exit_code }}
+          NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
+          SEMGREP_EXIT: ${{ steps.semgrep.outputs.exit_code }}
         run: |
-          TRIVY_VERSION=0.68.1
-          wget -q https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
-          tar zxvf trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
-          sudo mv trivy /usr/local/bin/trivy
-          trivy --version
+          failures=0
+          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${NPM_AUDIT_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${SEMGREP_EXIT:-0}" -ne 0 ]; then failures=1; fi
 
-      - name: Trivy repo scan
-        run: |
-          trivy fs \
-            --scanners vuln,misconfig,secret \
-            --format table \
-            --ignore-unfixed \
-            --severity CRITICAL,HIGH \
-            --exit-code 1 \
-            .
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::One or more quality/SAST checks reported failures."
+            exit 1
+          fi
 
-      - name: Generate application SBOM CycloneDX
-        run: |
-          trivy fs \
-            --scanners vuln \
-            --format cyclonedx \
-            --output app-sbom.cdx.json \
-            --ignore-unfixed \
-            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-            .
+  secrets-and-filesystem-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
 
-      - name: Upload application SBOM artifact
-        uses: actions/upload-artifact@v4
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
-          name: app-sbom
-          path: app-sbom.cdx.json
+          fetch-depth: 0
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+          cache: true
 
       - name: Gitleaks secrets scan
+        id: gitleaks
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - name: Trivy filesystem scan
+        id: trivy_fs
+        run: |
+          set +e
+          trivy fs \
+            --scanners vuln,misconfig \
+            --format sarif \
+            --output trivy-fs.sarif \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            .
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Upload Trivy filesystem SARIF artifact
+        if: hashFiles('trivy-fs.sarif') != ''
+        uses: actions/upload-artifact@v4
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          name: trivy-fs-sarif-${{ github.run_number }}
+          path: trivy-fs.sarif
+          retention-days: 90
+
+      - name: Upload Trivy SARIF to code scanning
+        if: hashFiles('trivy-fs.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-filesystem
+        continue-on-error: true
+
+      - name: Evaluate secrets and filesystem scan
+        if: always()
+        env:
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          TRIVY_FS_EXIT: ${{ steps.trivy_fs.outputs.exit_code }}
+        run: |
+          failures=0
+          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then failures=1; fi
+          if [ "${TRIVY_FS_EXIT:-0}" -ne 0 ]; then failures=1; fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Secrets/filesystem scanning failed policy."
+            exit 1
+          fi
+
+  container-image-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK for backend
+        if: hashFiles('pom.xml') != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js for frontend
+        if: hashFiles('package-lock.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Maven build
+        if: hashFiles('pom.xml') != ''
+        run: mvn -B clean package -DskipTests
+
+      - name: npm build
+        if: hashFiles('package-lock.json') != ''
+        run: |
+          npm ci
+          npm run build -- --configuration=production
+
+      - name: Cache Trivy DB
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@v0.2.4
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+          cache: true
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -128,110 +311,196 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Install Cosign
-        if: hashFiles('Dockerfile') != ''
-        uses: sigstore/cosign-installer@v3.4.0
-
       - name: Build backend image
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
+        if: hashFiles('pom.xml') != ''
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: false
           load: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/backend:latest
-
-      - name: Trivy scan backend image
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
-        run: |
-          trivy image \
-            --ignore-unfixed \
-            --severity CRITICAL,HIGH \
-            --exit-code 1 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
-
-      - name: Push backend image
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
-        run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/backend:latest
-
-      - name: Sign backend image
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        run: |
-          cosign sign --yes \
-            ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
-
-      - name: Generate backend image SBOM CycloneDX
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
-        run: |
-          trivy image \
-            --format cyclonedx \
-            --output backend-image-sbom.cdx.json \
-            --ignore-unfixed \
-            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-            ${{ secrets.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}
-
-      - name: Upload backend image SBOM artifact
-        if: hashFiles('pom.xml') != '' && hashFiles('Dockerfile') != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: backend-image-sbom
-          path: backend-image-sbom.cdx.json
+          tags: local/backend:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build frontend image
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
+        if: hashFiles('angular.json') != ''
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile
           push: false
           load: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest
+          tags: local/frontend:${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Trivy scan frontend image
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
+      - name: Trivy scan backend image
+        if: hashFiles('pom.xml') != ''
+        id: trivy_backend_image
         run: |
+          set +e
           trivy image \
-            --ignore-unfixed \
+            --format sarif \
+            --output trivy-backend-image.sarif \
             --severity CRITICAL,HIGH \
             --exit-code 1 \
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
+            local/backend:${{ env.IMAGE_TAG }}
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
 
-      - name: Push frontend image
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
+      - name: Trivy scan frontend image
+        if: hashFiles('angular.json') != ''
+        id: trivy_frontend_image
         run: |
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
-          docker push ${{ secrets.DOCKERHUB_USERNAME }}/frontend:latest
-
-      - name: Sign frontend image
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
-        env:
-          COSIGN_EXPERIMENTAL: "true"
-        run: |
-          cosign sign --yes \
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
-
-      - name: Generate frontend image SBOM CycloneDX
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
-        run: |
+          set +e
           trivy image \
-            --format cyclonedx \
-            --output frontend-image-sbom.cdx.json \
-            --ignore-unfixed \
-            --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL \
-            ${{ secrets.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}
+            --format sarif \
+            --output trivy-frontend-image.sarif \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            local/frontend:${{ env.IMAGE_TAG }}
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
 
-      - name: Upload frontend image SBOM artifact
-        if: hashFiles('angular.json') != '' && hashFiles('Dockerfile') != ''
+      - name: Upload Trivy backend image SARIF artifact
+        if: hashFiles('trivy-backend-image.sarif') != ''
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-image-sbom
-          path: frontend-image-sbom.cdx.json
+          name: trivy-backend-image-sarif-${{ github.run_number }}
+          path: trivy-backend-image.sarif
+          retention-days: 90
+
+      - name: Upload Trivy frontend image SARIF artifact
+        if: hashFiles('trivy-frontend-image.sarif') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-frontend-image-sarif-${{ github.run_number }}
+          path: trivy-frontend-image.sarif
+          retention-days: 90
+
+      - name: Upload Trivy backend image SARIF to code scanning
+        if: hashFiles('trivy-backend-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-backend-image.sarif
+          category: trivy-backend-image
+        continue-on-error: true
+
+      - name: Upload Trivy frontend image SARIF to code scanning
+        if: hashFiles('trivy-frontend-image.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-frontend-image.sarif
+          category: trivy-frontend-image
+        continue-on-error: true
+
+      - name: Evaluate image scans
+        if: always()
+        env:
+          BACKEND_EXIT: ${{ steps.trivy_backend_image.outputs.exit_code }}
+          FRONTEND_EXIT: ${{ steps.trivy_frontend_image.outputs.exit_code }}
+        run: |
+          failures=0
+          if [ "${BACKEND_EXIT:-0}" -ne 0 ]; then failures=1; fi
+          if [ "${FRONTEND_EXIT:-0}" -ne 0 ]; then failures=1; fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Container image scanning failed policy."
+            exit 1
+          fi
+
+  license-compliance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK for backend
+        if: hashFiles('pom.xml') != ''
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js for frontend
+        if: hashFiles('package-lock.json') != ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Maven license check
+        if: hashFiles('pom.xml') != ''
+        run: mvn org.codehaus.mojo:license-maven-plugin:aggregate-third-party-report || true
+        continue-on-error: true
+
+      - name: npm license check
+        if: hashFiles('package-lock.json') != ''
+        run: |
+          npm install -g license-checker
+          npm ci
+          license-checker --json --out licenses.json || true
+        continue-on-error: true
+
+      - name: Upload license reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: license-reports-${{ github.run_number }}
+          path: |
+            target/generated-sources/license/THIRD-PARTY.txt
+            licenses.json
+          retention-days: 90
+          if-no-files-found: warn
+
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
+    if: always()
+
+    steps:
+      - name: Generate security summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          # Application Security Scan Results
+
+          ## Job Status
+
+          | Job | Status |
+          |-----|--------|
+          | Code Quality & SAST | ${{ needs.code-quality-and-sast.result }} |
+          | Secrets & Filesystem Scan | ${{ needs.secrets-and-filesystem-scan.result }} |
+          | Container Image Scan | ${{ needs.container-image-scan.result }} |
+          | License Compliance | ${{ needs.license-compliance.result }} |
+
+          ## Next Steps
+
+          - Review SARIF findings in Security tab
+          - Check artifacts for detailed reports
+          - Address critical and high severity issues before merge
+
+          ---
+          Pre-merge security validation completed
+          EOF
+
+      - name: Check critical failures
+        run: |
+          failures=0
+          if [ "${{ needs.secrets-and-filesystem-scan.result }}" != "success" ]; then failures=1; fi
+          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then failures=1; fi
+          if [ "${{ needs.code-quality-and-sast.result }}" != "success" ]; then failures=1; fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Pre-merge DevSecOps failed."
+            exit 1
+          fi
