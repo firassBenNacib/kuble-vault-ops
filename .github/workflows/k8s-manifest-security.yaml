@@ -378,7 +378,7 @@ jobs:
           - SARIF files uploaded to GitHub Security tab
           - Detailed reports available in workflow artifacts
           - Security findings annotated in code
-          
+
           ---
           Security scan completed on ${{ github.ref_name }}
           EOF
@@ -398,11 +398,11 @@ jobs:
             comment += '| Scanner | Result |\n';
             comment += '|---------|--------|\n';
             comment += `| Trivy Secrets | ${{ steps.trivy_secrets.outcome }} |\n`;
-            comment += `| Kubeconform | Passed |\n`;
+            comment += `| Kubeconform | ${{ steps.kubeconform.outcome }} |\n`;
             comment += `| Vault Policies | ${{ steps.vault_policies.outcome }} |\n`;
             comment += '\n### Security Scans\n\n';
             comment += '| Scanner | Result |\n';
-            comment += '|---------|--------|\n`;
+            comment += '|---------|--------|\n';
             comment += `| Trivy Misconfig | ${{ steps.trivy_misconfig.outcome }} |\n`;
             comment += `| Kubescape | ${{ steps.kubescape.outcome }} |\n`;
             comment += `| Checkov | ${{ steps.checkov.outcome }} |\n`;
