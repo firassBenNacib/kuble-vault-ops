@@ -9,6 +9,9 @@ env:
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
+  DEPENDENCY_CHECK_DATA: ~/.dependency-check
+  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+
 jobs:
   code-quality-and-sast:
     runs-on: ubuntu-latest
@@ -49,14 +52,41 @@ jobs:
         if: hashFiles('pom.xml') != ''
         run: mvn -B clean verify
 
+      - name: Cache OWASP Dependency-Check data
+        if: hashFiles('pom.xml') != ''
+        id: depcheck_cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.DEPENDENCY_CHECK_DATA }}
+          key: depcheck-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            depcheck-${{ runner.os }}-
+
       - name: Maven dependency check
         if: hashFiles('pom.xml') != ''
         id: depcheck
         run: |
           set +e
+
+          mkdir -p "${DEPENDENCY_CHECK_DATA}"
+
+          AUTO_UPDATE=true
+          if [ "${{ steps.depcheck_cache.outputs.cache-hit }}" = "true" ]; then
+            AUTO_UPDATE=false
+          fi
+
+          EXTRA_NVD=""
+          if [ -n "${NVD_API_KEY}" ]; then
+            EXTRA_NVD="-DnvdApiKey=${NVD_API_KEY}"
+          fi
+
           mvn org.owasp:dependency-check-maven:check \
             -DfailBuildOnCVSS=7 \
-            -DsuppressionFiles=dependency-check-suppressions.xml
+            -DsuppressionFiles=dependency-check-suppressions.xml \
+            -DdataDirectory="${DEPENDENCY_CHECK_DATA}" \
+            -DautoUpdate="${AUTO_UPDATE}" \
+            ${EXTRA_NVD}
+
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
@@ -482,12 +512,6 @@ jobs:
           | Secrets & Filesystem Scan | ${{ needs.secrets-and-filesystem-scan.result }} |
           | Container Image Scan | ${{ needs.container-image-scan.result }} |
           | License Compliance | ${{ needs.license-compliance.result }} |
-
-          ## Next Steps
-
-          - Review SARIF findings in Security tab
-          - Check artifacts for detailed reports
-          - Address critical and high severity issues before merge
 
           ---
           Pre-merge security validation completed
