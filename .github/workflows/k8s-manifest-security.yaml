@@ -306,7 +306,7 @@ jobs:
             --framework kubernetes \
             --output sarif \
             --output-file-path checkov-results.sarif \
-            --skip-framework dockerfile,dockerfile_lint,secrets \
+            --skip-framework dockerfile,secrets \
             --compact \
             --quiet
         continue-on-error: true
