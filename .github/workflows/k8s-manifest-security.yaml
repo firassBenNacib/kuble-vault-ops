@@ -379,12 +379,6 @@ jobs:
           - Detailed reports available in workflow artifacts
           - Security findings annotated in code
           
-          ## Next Steps
-          
-          1. Review findings in the Security tab
-          2. Check workflow artifacts for detailed reports
-          3. Address critical and high severity issues
-          
           ---
           Security scan completed on ${{ github.ref_name }}
           EOF
