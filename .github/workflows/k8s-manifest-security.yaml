@@ -365,7 +365,7 @@ jobs:
           | Scanner | Status | Severity |
           |---------|--------|----------|
           | Trivy Secrets | ${{ steps.trivy_secrets.outcome }} | Critical |
-          | Kubeconform | Passed | Critical |
+          | Kubeconform | ${{ steps.kubeconform.outcome }} | Critical |
           | Vault Policies | ${{ steps.vault_policies.outcome }} | Critical |
           | Trivy Misconfig | ${{ steps.trivy_misconfig.outcome }} | High |
           | Trivy Config | ${{ steps.trivy_config.outcome }} | High |
