@@ -22,7 +22,7 @@ jobs:
       security-events: write
       checks: write
       actions: read
-      
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -114,7 +114,7 @@ jobs:
         id: npm_tests
         run: |
           set +e
-          npm test -- --watch=false --browsers=ChromeHeadlessCI --code-coverage
+          npm test
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
