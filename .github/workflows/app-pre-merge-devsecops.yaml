@@ -114,7 +114,7 @@ jobs:
         id: npm_tests
         run: |
           set +e
-          npm test
+          npm run test:ci
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
