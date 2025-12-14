@@ -15,7 +15,7 @@ env:
 jobs:
   code-quality-and-sast:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
 
     permissions:
       contents: read
@@ -113,7 +113,7 @@ jobs:
         id: npm_tests
         run: |
           set +e
-          npm test -- --watch=false --code-coverage
+          npm test -- --watch=false --browsers=ChromeHeadlessCI --code-coverage
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
