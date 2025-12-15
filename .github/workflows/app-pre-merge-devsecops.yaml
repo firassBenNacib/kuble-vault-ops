@@ -2,14 +2,23 @@ name: App Pre-merge DevSecOps
 
 on:
   workflow_call:
+    inputs:
+      enable_code_scanning:
+        description: 'Enable GitHub Code Scanning (requires paid private repo or public repo)'
+        required: false
+        type: boolean
+        default: false
 
 env:
   IMAGE_TAG: ${{ github.sha }}
   TRIVY_VERSION: '0.68.1'
+  SEMGREP_VERSION: '1.145.0'
+  SYFT_VERSION: 'v1.38.2'
+  LICENSE_CHECKER_VERSION: '25.0.1'
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-
   DEPENDENCY_CHECK_DATA: ~/.dependency-check
+  DEPENDENCY_CHECK_VERSION: '12.1.9'
   NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
 
 jobs:
@@ -22,16 +31,23 @@ jobs:
       security-events: write
       checks: write
       actions: read
+      pull-requests: read
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Set up JDK for backend
         if: hashFiles('pom.xml') != ''
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
         with:
           distribution: temurin
           java-version: "21"
@@ -39,55 +55,82 @@ jobs:
 
       - name: Set up Node.js for frontend
         if: hashFiles('package-lock.json') != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: "20"
           cache: npm
 
+      - name: Check jq availability for Trunk
+        if: hashFiles('.trunk/trunk.yaml') != ''
+        run: |
+          if ! command -v jq &> /dev/null; then
+            echo "::warning::jq not found, installing for Trunk compatibility"
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          jq --version
+
       - name: Trunk Code Quality
         if: hashFiles('.trunk/trunk.yaml') != ''
-        uses: trunk-io/trunk-action@v1.2.4
+        uses: trunk-io/trunk-action@75699af9e26881e564e9d832ef7dc3af25ec031b # v1.2.4
         continue-on-error: true
 
       - name: Maven build and tests
         if: hashFiles('pom.xml') != ''
-        run: mvn -B clean verify
+        run: mvn -B clean verify -DskipTests=false
+        env:
+          MAVEN_OPTS: "-Xmx2048m"
 
       - name: Cache OWASP Dependency-Check data
         if: hashFiles('pom.xml') != ''
         id: depcheck_cache
-        uses: actions/cache@v4
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ env.DEPENDENCY_CHECK_DATA }}
-          key: depcheck-${{ runner.os }}-${{ hashFiles('**/pom.xml') }}
+          key: depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}-${{ github.run_id }}
           restore-keys: |
-            depcheck-${{ runner.os }}-
+            depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}-
+            depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
       - name: Maven dependency check
         if: hashFiles('pom.xml') != ''
         id: depcheck
         run: |
           set +e
-
+          
           mkdir -p "${DEPENDENCY_CHECK_DATA}"
 
           AUTO_UPDATE=true
+          CACHE_AGE_HOURS=24
+          
           if [ "${{ steps.depcheck_cache.outputs.cache-hit }}" = "true" ]; then
-            AUTO_UPDATE=false
+            if [ -f "${DEPENDENCY_CHECK_DATA}/odc.mv.db" ]; then
+              CACHE_AGE_SECONDS=$(($(date +%s) - $(stat -c %Y "${DEPENDENCY_CHECK_DATA}/odc.mv.db")))
+              CACHE_AGE_HOURS=$((CACHE_AGE_SECONDS / 3600))
+              
+              if [ $CACHE_AGE_HOURS -lt 24 ]; then
+                echo "Cache is recent (${CACHE_AGE_HOURS} hours old), skipping auto-update"
+                AUTO_UPDATE=false
+              else
+                echo "Cache is old (${CACHE_AGE_HOURS} hours), enabling auto-update"
+              fi
+            fi
           fi
-
+          
           EXTRA_NVD=""
           if [ -n "${NVD_API_KEY}" ]; then
             EXTRA_NVD="-DnvdApiKey=${NVD_API_KEY}"
+            echo "Using NVD API key for faster updates"
           fi
-
-          mvn org.owasp:dependency-check-maven:check \
+          
+          mvn org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
             -DfailBuildOnCVSS=7 \
             -DsuppressionFiles=dependency-check-suppressions.xml \
             -DdataDirectory="${DEPENDENCY_CHECK_DATA}" \
             -DautoUpdate="${AUTO_UPDATE}" \
+            -DformatsWithEmptyReport=sarif \
+            -Dformats=HTML,JSON,SARIF \
             ${EXTRA_NVD}
-
+          
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
@@ -95,7 +138,7 @@ jobs:
 
       - name: npm install
         if: hashFiles('package-lock.json') != ''
-        run: npm ci
+        run: npm ci --prefer-offline --no-audit
 
       - name: npm audit
         if: hashFiles('package-lock.json') != ''
@@ -114,7 +157,7 @@ jobs:
         id: npm_tests
         run: |
           set +e
-          npm run test:ci
+          npm run test:ci 2>&1 | tee npm-test.log
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
@@ -126,15 +169,30 @@ jobs:
 
       - name: Upload npm audit results
         if: hashFiles('npm-audit.json') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-audit-${{ github.run_number }}
           path: npm-audit.json
           retention-days: 30
           if-no-files-found: warn
 
+      - name: Upload dependency-check reports
+        if: hashFiles('pom.xml') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: dependency-check-${{ github.run_number }}
+          path: |
+            target/dependency-check-report.html
+            target/dependency-check-report.json
+            target/dependency-check-report.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
       - name: Install Semgrep
-        run: python -m pip install --upgrade pip semgrep
+        run: |
+          python3 -m pip install --no-cache-dir --upgrade pip
+          python3 -m pip install --no-cache-dir semgrep==${{ env.SEMGREP_VERSION }}
+          semgrep --version
 
       - name: Semgrep SAST
         id: semgrep
@@ -152,17 +210,17 @@ jobs:
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      - name: Upload Semgrep SARIF
+      - name: Upload Semgrep SARIF artifact
         if: hashFiles('semgrep.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: semgrep-sarif-${{ github.run_number }}
           path: semgrep.sarif
           retention-days: 90
 
       - name: Upload Semgrep SARIF to code scanning
-        if: hashFiles('semgrep.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        if: hashFiles('semgrep.sarif') != '' && inputs.enable_code_scanning == true
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: semgrep.sarif
           category: semgrep
@@ -170,7 +228,7 @@ jobs:
 
       - name: SonarQube analysis
         if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
-        uses: SonarSource/sonarqube-scan-action@v1
+        uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9 # v7.0.0
         env:
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
@@ -178,7 +236,7 @@ jobs:
 
       - name: SonarQube Quality Gate
         if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
-        uses: sonarsource/sonarqube-quality-gate-action@master
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
@@ -193,11 +251,27 @@ jobs:
           SEMGREP_EXIT: ${{ steps.semgrep.outputs.exit_code }}
         run: |
           failures=0
-          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then failures=1; fi
-          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then failures=1; fi
-          if [ "${NPM_AUDIT_EXIT:-0}" -ne 0 ]; then failures=1; fi
-          if [ "${SEMGREP_EXIT:-0}" -ne 0 ]; then failures=1; fi
-
+          
+          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then 
+            echo "::error::NPM tests failed"
+            failures=1
+          fi
+          
+          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then 
+            echo "::warning::Dependency check found vulnerabilities (CVSS >= 7)"
+            failures=1
+          fi
+          
+          if [ "${NPM_AUDIT_EXIT:-0}" -ne 0 ]; then 
+            echo "::warning::NPM audit found high/critical vulnerabilities"
+            failures=1
+          fi
+          
+          if [ "${SEMGREP_EXIT:-0}" -ne 0 ]; then 
+            echo "::warning::Semgrep SAST found issues"
+            failures=1
+          fi
+          
           if [ "$failures" -ne 0 ]; then
             echo "::error::One or more quality/SAST checks reported failures."
             exit 1
@@ -210,30 +284,38 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
+      pull-requests: read
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Cache Trivy DB
-        uses: actions/cache@v4
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
           restore-keys: |
-            trivy-db-${{ runner.os }}-
+            trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-
 
       - name: Setup Trivy
-        uses: aquasecurity/setup-trivy@v0.2.4
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
         with:
           version: v${{ env.TRIVY_VERSION }}
           cache: true
 
       - name: Gitleaks secrets scan
         id: gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
@@ -243,7 +325,7 @@ jobs:
         run: |
           set +e
           trivy fs \
-            --scanners vuln,misconfig \
+            --scanners vuln,misconfig,secret \
             --format sarif \
             --output trivy-fs.sarif \
             --severity CRITICAL,HIGH \
@@ -256,15 +338,15 @@ jobs:
 
       - name: Upload Trivy filesystem SARIF artifact
         if: hashFiles('trivy-fs.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-fs-sarif-${{ github.run_number }}
           path: trivy-fs.sarif
           retention-days: 90
 
-      - name: Upload Trivy SARIF to code scanning
-        if: hashFiles('trivy-fs.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+      - name: Upload Trivy filesystem SARIF to code scanning
+        if: hashFiles('trivy-fs.sarif') != '' && inputs.enable_code_scanning == true
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-fs.sarif
           category: trivy-filesystem
@@ -277,9 +359,17 @@ jobs:
           TRIVY_FS_EXIT: ${{ steps.trivy_fs.outputs.exit_code }}
         run: |
           failures=0
-          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then failures=1; fi
-          if [ "${TRIVY_FS_EXIT:-0}" -ne 0 ]; then failures=1; fi
-
+          
+          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then 
+            echo "::error::Gitleaks found secrets in repository"
+            failures=1
+          fi
+          
+          if [ "${TRIVY_FS_EXIT:-0}" -ne 0 ]; then 
+            echo "::error::Trivy filesystem scan found critical/high issues"
+            failures=1
+          fi
+          
           if [ "$failures" -ne 0 ]; then
             echo "::error::Secrets/filesystem scanning failed policy."
             exit 1
@@ -292,14 +382,23 @@ jobs:
     permissions:
       contents: read
       security-events: write
+      actions: read
+      pull-requests: read
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up JDK for backend
         if: hashFiles('pom.xml') != ''
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
         with:
           distribution: temurin
           java-version: "21"
@@ -307,7 +406,7 @@ jobs:
 
       - name: Set up Node.js for frontend
         if: hashFiles('package-lock.json') != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: "20"
           cache: npm
@@ -315,36 +414,38 @@ jobs:
       - name: Maven build
         if: hashFiles('pom.xml') != ''
         run: mvn -B clean package -DskipTests
+        env:
+          MAVEN_OPTS: "-Xmx2048m"
 
       - name: npm build
         if: hashFiles('package-lock.json') != ''
         run: |
-          npm ci
+          npm ci --prefer-offline --no-audit
           npm run build -- --configuration=production
 
       - name: Cache Trivy DB
-        uses: actions/cache@v4
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
           restore-keys: |
-            trivy-db-${{ runner.os }}-
+            trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-
 
       - name: Setup Trivy
-        uses: aquasecurity/setup-trivy@v0.2.4
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
         with:
           version: v${{ env.TRIVY_VERSION }}
           cache: true
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Build backend image
         if: hashFiles('pom.xml') != ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: ./Dockerfile
@@ -356,7 +457,7 @@ jobs:
 
       - name: Build frontend image
         if: hashFiles('angular.json') != ''
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
           file: ./Dockerfile
@@ -365,6 +466,35 @@ jobs:
           tags: local/frontend:${{ env.IMAGE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Install Syft
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/${{ env.SYFT_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+          syft version
+
+      - name: Generate backend SBOM
+        if: hashFiles('pom.xml') != ''
+        run: |
+          syft local/backend:${{ env.IMAGE_TAG }} \
+            -o cyclonedx-json=backend-sbom.cdx.json \
+            -o spdx-json=backend-sbom.spdx.json
+
+      - name: Generate frontend SBOM
+        if: hashFiles('angular.json') != ''
+        run: |
+          syft local/frontend:${{ env.IMAGE_TAG }} \
+            -o cyclonedx-json=frontend-sbom.cdx.json \
+            -o spdx-json=frontend-sbom.spdx.json
+
+      - name: Upload SBOMs
+        if: hashFiles('*-sbom.*.json') != ''
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: pre-merge-sboms-${{ github.run_number }}
+          path: |
+            *-sbom.cdx.json
+            *-sbom.spdx.json
+          retention-days: 30
 
       - name: Trivy scan backend image
         if: hashFiles('pom.xml') != ''
@@ -400,7 +530,7 @@ jobs:
 
       - name: Upload Trivy backend image SARIF artifact
         if: hashFiles('trivy-backend-image.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-backend-image-sarif-${{ github.run_number }}
           path: trivy-backend-image.sarif
@@ -408,23 +538,23 @@ jobs:
 
       - name: Upload Trivy frontend image SARIF artifact
         if: hashFiles('trivy-frontend-image.sarif') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-frontend-image-sarif-${{ github.run_number }}
           path: trivy-frontend-image.sarif
           retention-days: 90
 
       - name: Upload Trivy backend image SARIF to code scanning
-        if: hashFiles('trivy-backend-image.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        if: hashFiles('trivy-backend-image.sarif') != '' && inputs.enable_code_scanning == true
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-backend-image.sarif
           category: trivy-backend-image
         continue-on-error: true
 
       - name: Upload Trivy frontend image SARIF to code scanning
-        if: hashFiles('trivy-frontend-image.sarif') != ''
-        uses: github/codeql-action/upload-sarif@v4
+        if: hashFiles('trivy-frontend-image.sarif') != '' && inputs.enable_code_scanning == true
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-frontend-image.sarif
           category: trivy-frontend-image
@@ -437,9 +567,17 @@ jobs:
           FRONTEND_EXIT: ${{ steps.trivy_frontend_image.outputs.exit_code }}
         run: |
           failures=0
-          if [ "${BACKEND_EXIT:-0}" -ne 0 ]; then failures=1; fi
-          if [ "${FRONTEND_EXIT:-0}" -ne 0 ]; then failures=1; fi
-
+          
+          if [ "${BACKEND_EXIT:-0}" -ne 0 ]; then 
+            echo "::error::Backend image scan found critical/high vulnerabilities"
+            failures=1
+          fi
+          
+          if [ "${FRONTEND_EXIT:-0}" -ne 0 ]; then 
+            echo "::error::Frontend image scan found critical/high vulnerabilities"
+            failures=1
+          fi
+          
           if [ "$failures" -ne 0 ]; then
             echo "::error::Container image scanning failed policy."
             exit 1
@@ -451,14 +589,22 @@ jobs:
 
     permissions:
       contents: read
+      pull-requests: read
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up JDK for backend
         if: hashFiles('pom.xml') != ''
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
         with:
           distribution: temurin
           java-version: "21"
@@ -466,26 +612,56 @@ jobs:
 
       - name: Set up Node.js for frontend
         if: hashFiles('package-lock.json') != ''
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: "20"
           cache: npm
 
       - name: Maven license check
         if: hashFiles('pom.xml') != ''
-        run: mvn org.codehaus.mojo:license-maven-plugin:aggregate-third-party-report || true
+        id: maven_license
+        run: |
+          set +e
+          mvn org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-third-party-report
+
+          BANNED_LICENSES=("GPL-3.0" "AGPL-3.0" "LGPL-3.0")
+          
+          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
+            for license in "${BANNED_LICENSES[@]}"; do
+              if grep -q "$license" "target/generated-sources/license/THIRD-PARTY.txt"; then
+                echo "::error::Found banned license: $license"
+                echo "banned_found=true" >> "$GITHUB_OUTPUT"
+                exit_code=1
+              fi
+            done
+          fi
+          
+          exit $exit_code
         continue-on-error: true
 
       - name: npm license check
         if: hashFiles('package-lock.json') != ''
+        id: npm_license
         run: |
-          npm install -g license-checker
-          npm ci
-          license-checker --json --out licenses.json || true
+          npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
+          npm ci --prefer-offline --no-audit
+          
+          set +e
+
+          license-checker --json --out licenses.json
+
+          license-checker \
+            --failOn "GPL-3.0;AGPL-3.0;LGPL-3.0" \
+            --summary
+          
+          exit_code=$?
+          set -e
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       - name: Upload license reports
-        uses: actions/upload-artifact@v4
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: license-reports-${{ github.run_number }}
           path: |
@@ -494,26 +670,73 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
+      - name: Evaluate license compliance
+        if: always()
+        env:
+          MAVEN_LICENSE_EXIT: ${{ steps.maven_license.outputs.banned_found }}
+          NPM_LICENSE_EXIT: ${{ steps.npm_license.outputs.exit_code }}
+        run: |
+          failures=0
+          
+          if [ "${MAVEN_LICENSE_EXIT}" = "true" ]; then
+            echo "::error::Maven dependencies contain banned licenses (GPL-3.0, AGPL-3.0, LGPL-3.0)"
+            failures=1
+          fi
+          
+          if [ "${NPM_LICENSE_EXIT:-0}" -ne 0 ]; then
+            echo "::error::NPM dependencies contain banned licenses (GPL-3.0, AGPL-3.0, LGPL-3.0)"
+            failures=1
+          fi
+          
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::License compliance check failed."
+            exit 1
+          fi
+
   security-summary:
     runs-on: ubuntu-latest
     needs: [code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
     if: always()
 
+    permissions:
+      contents: read
+      pull-requests: write
+
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Generate security summary
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<'EOF'
-          # Application Security Scan Results
-
+          # Application Security Scan Results (Pre-merge)
+          
           ## Job Status
-
+          
           | Job | Status |
           |-----|--------|
           | Code Quality & SAST | ${{ needs.code-quality-and-sast.result }} |
           | Secrets & Filesystem Scan | ${{ needs.secrets-and-filesystem-scan.result }} |
           | Container Image Scan | ${{ needs.container-image-scan.result }} |
           | License Compliance | ${{ needs.license-compliance.result }} |
-
+          
+          ## Security Policies Enforced
+          
+          - Secrets scanning (Gitleaks)
+          - SAST analysis (Semgrep)
+          - Dependency vulnerabilities (OWASP, npm audit)
+          - Container image vulnerabilities (Trivy)
+          - License compliance (GPL-3.0, AGPL-3.0, LGPL-3.0 blocked)
+          - Filesystem misconfigurations (Trivy)
+          
+          ## Build Information
+          
+          - Commit: ${{ github.sha }}
+          - Branch: ${{ github.ref_name }}
+          - Triggered by: ${{ github.event_name }}
+          
           ---
           Pre-merge security validation completed
           EOF
@@ -521,11 +744,30 @@ jobs:
       - name: Check critical failures
         run: |
           failures=0
-          if [ "${{ needs.secrets-and-filesystem-scan.result }}" != "success" ]; then failures=1; fi
-          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then failures=1; fi
-          if [ "${{ needs.code-quality-and-sast.result }}" != "success" ]; then failures=1; fi
-
+          
+          if [ "${{ needs.secrets-and-filesystem-scan.result }}" != "success" ]; then 
+            echo "::error::Secrets/filesystem scan failed - possible security issues detected"
+            failures=1
+          fi
+          
+          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then 
+            echo "::error::Container image scan failed - critical vulnerabilities found"
+            failures=1
+          fi
+          
+          if [ "${{ needs.code-quality-and-sast.result }}" != "success" ]; then 
+            echo "::error::Code quality/SAST checks failed"
+            failures=1
+          fi
+          
+          if [ "${{ needs.license-compliance.result }}" != "success" ]; then 
+            echo "::error::License compliance check failed - banned licenses detected"
+            failures=1
+          fi
+          
           if [ "$failures" -ne 0 ]; then
-            echo "::error::Pre-merge DevSecOps failed."
+            echo "::error::Pre-merge DevSecOps validation failed. Review the job outputs above."
             exit 1
           fi
+          
+          echo "All pre-merge security checks passed successfully!"
