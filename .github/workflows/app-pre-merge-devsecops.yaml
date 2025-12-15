@@ -186,7 +186,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload dependency-check reports
-        if: always()
+        if: hashFiles('pom.xml') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dependency-check-${{ github.run_number }}
@@ -571,7 +571,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Trivy backend image SARIF artifact
-        if: always()
+        if: hashFiles('trivy-backend-image.sarif') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-backend-image-sarif-${{ github.run_number }}
@@ -695,23 +695,29 @@ jobs:
           npm ci --prefer-offline --no-audit
           license-checker --json --out licenses.json
 
-          python3 - <<'PY' >> "$GITHUB_OUTPUT"
-          import json, os, re, sys
+          python3 - <<'PY'
+          import json, os
+
           banned=os.environ.get("BANNED_LICENSE_TOKENS","").split(",")
           banned=[b.strip() for b in banned if b.strip()]
-          data=json.load(open("licenses.json"))
+
+          data=json.load(open("licenses.json", encoding="utf-8"))
           bad=[]
           for pkg, info in data.items():
             lic=info.get("licenses","")
             s=";".join(lic) if isinstance(lic,list) else str(lic)
             if any(tok in s for tok in banned):
               bad.append((pkg,s))
-          print(f"banned_count={len(bad)}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"banned_count={len(bad)}\n")
+
           if bad:
             print("First offenders:")
             for pkg,s in bad[:50]:
               print(f"- {pkg}: {s}")
           PY
+
 
       - name: Upload license reports
         if: always()
@@ -779,7 +785,7 @@ jobs:
           - SAST analysis (Semgrep)
           - Dependency vulnerabilities (OWASP, npm audit)
           - Container image vulnerabilities (Trivy)
-          - License compliance (token-based: ${BANNED_LICENSE_TOKENS})
+          - License compliance (token-based)
           - Filesystem misconfigurations (Trivy)
 
           EOF
