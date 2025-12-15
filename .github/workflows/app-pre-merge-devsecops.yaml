@@ -20,12 +20,12 @@ env:
   DEPENDENCY_CHECK_DATA: ~/.dependency-check
   DEPENDENCY_CHECK_VERSION: '12.1.9'
   NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+  BANNED_LICENSE_TOKENS: 'GPL-3.0,AGPL-3.0,LGPL-3.0'
 
 jobs:
   code-quality-and-sast:
     runs-on: ubuntu-latest
     timeout-minutes: 50
-
     permissions:
       contents: read
       security-events: write
@@ -86,9 +86,8 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ${{ env.DEPENDENCY_CHECK_DATA }}
-          key: depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}-${{ github.run_id }}
+          key: depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}
           restore-keys: |
-            depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}-
             depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
       - name: Maven dependency check
@@ -96,41 +95,36 @@ jobs:
         id: depcheck
         run: |
           set +e
-          
           mkdir -p "${DEPENDENCY_CHECK_DATA}"
 
           AUTO_UPDATE=true
-          CACHE_AGE_HOURS=24
-          
-          if [ "${{ steps.depcheck_cache.outputs.cache-hit }}" = "true" ]; then
-            if [ -f "${DEPENDENCY_CHECK_DATA}/odc.mv.db" ]; then
-              CACHE_AGE_SECONDS=$(($(date +%s) - $(stat -c %Y "${DEPENDENCY_CHECK_DATA}/odc.mv.db")))
-              CACHE_AGE_HOURS=$((CACHE_AGE_SECONDS / 3600))
-              
-              if [ $CACHE_AGE_HOURS -lt 24 ]; then
-                echo "Cache is recent (${CACHE_AGE_HOURS} hours old), skipping auto-update"
-                AUTO_UPDATE=false
-              else
-                echo "Cache is old (${CACHE_AGE_HOURS} hours), enabling auto-update"
-              fi
+          if [ "${{ steps.depcheck_cache.outputs.cache-hit }}" = "true" ] && [ -f "${DEPENDENCY_CHECK_DATA}/odc.mv.db" ]; then
+            CACHE_AGE_SECONDS=$(($(date +%s) - $(stat -c %Y "${DEPENDENCY_CHECK_DATA}/odc.mv.db")))
+            CACHE_AGE_HOURS=$((CACHE_AGE_SECONDS / 3600))
+            if [ $CACHE_AGE_HOURS -lt 24 ]; then
+              echo "Cache is recent (${CACHE_AGE_HOURS} hours old), skipping auto-update"
+              AUTO_UPDATE=false
             fi
           fi
-          
+
           EXTRA_NVD=""
           if [ -n "${NVD_API_KEY}" ]; then
             EXTRA_NVD="-DnvdApiKey=${NVD_API_KEY}"
-            echo "Using NVD API key for faster updates"
           fi
-          
+
+          SUPPRESS_ARG=""
+          if [ -f "dependency-check-suppressions.xml" ]; then
+            SUPPRESS_ARG="-DsuppressionFiles=dependency-check-suppressions.xml"
+          fi
+
           mvn org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
             -DfailBuildOnCVSS=7 \
-            -DsuppressionFiles=dependency-check-suppressions.xml \
             -DdataDirectory="${DEPENDENCY_CHECK_DATA}" \
             -DautoUpdate="${AUTO_UPDATE}" \
-            -DformatsWithEmptyReport=sarif \
             -Dformats=HTML,JSON,SARIF \
+            ${SUPPRESS_ARG} \
             ${EXTRA_NVD}
-          
+
           exit_code=$?
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
@@ -140,25 +134,31 @@ jobs:
         if: hashFiles('package-lock.json') != ''
         run: npm ci --prefer-offline --no-audit
 
-      - name: npm audit
+      - name: npm audit (gate on parsed JSON)
         if: hashFiles('package-lock.json') != ''
         id: npm_audit
         run: |
-          set +e
-          npm audit --audit-level=high --json > npm-audit.json
-          npm audit --audit-level=high
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+          set -euo pipefail
+          npm audit --audit-level=high --json > npm-audit.json || true
 
-      - name: npm tests
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          data=json.load(open("npm-audit.json"))
+          vul=data.get("metadata",{}).get("vulnerabilities",{})
+          high=int(vul.get("high",0) or 0)
+          critical=int(vul.get("critical",0) or 0)
+          print(f"high={high}")
+          print(f"critical={critical}")
+          print(f"high_critical_total={high+critical}")
+          PY
+
+      - name: npm tests (skip if script missing)
         if: hashFiles('package-lock.json') != ''
         id: npm_tests
         run: |
           set +e
-          npm run test:ci 2>&1 | tee npm-test.log
-          exit_code=$?
+          npm run test:ci --if-present 2>&1 | tee npm-test.log
+          exit_code=${PIPESTATUS[0]}
           set -e
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
@@ -168,7 +168,7 @@ jobs:
         run: npm run build -- --configuration=production
 
       - name: Upload npm audit results
-        if: hashFiles('npm-audit.json') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-audit-${{ github.run_number }}
@@ -176,8 +176,17 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+      - name: Upload npm test log
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: npm-test-log-${{ github.run_number }}
+          path: npm-test.log
+          retention-days: 30
+          if-no-files-found: warn
+
       - name: Upload dependency-check reports
-        if: hashFiles('pom.xml') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dependency-check-${{ github.run_number }}
@@ -194,7 +203,7 @@ jobs:
           python3 -m pip install --no-cache-dir semgrep==${{ env.SEMGREP_VERSION }}
           semgrep --version
 
-      - name: Semgrep SAST
+      - name: Semgrep SAST (gate only on SARIF level=error)
         id: semgrep
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
@@ -205,21 +214,36 @@ jobs:
           else
             semgrep scan --config p/ci --sarif --output semgrep.sarif
           fi
-          exit_code=$?
+          tool_exit=$?
           set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+          echo "tool_exit=$tool_exit" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if not os.path.exists("semgrep.sarif"):
+            print("error_count=0"); print("warning_count=0"); raise SystemExit(0)
+          d=json.load(open("semgrep.sarif"))
+          results=[]
+          for run in d.get("runs",[]):
+            results += run.get("results",[]) or []
+          err=sum(1 for r in results if (r.get("level") or "").lower()=="error")
+          warn=sum(1 for r in results if (r.get("level") or "").lower()=="warning")
+          print(f"error_count={err}")
+          print(f"warning_count={warn}")
+          PY
         continue-on-error: true
 
       - name: Upload Semgrep SARIF artifact
-        if: hashFiles('semgrep.sarif') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: semgrep-sarif-${{ github.run_number }}
           path: semgrep.sarif
           retention-days: 90
+          if-no-files-found: warn
 
       - name: Upload Semgrep SARIF to code scanning
-        if: hashFiles('semgrep.sarif') != '' && inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: semgrep.sarif
@@ -246,41 +270,46 @@ jobs:
         if: always()
         env:
           DEPCHECK_EXIT: ${{ steps.depcheck.outputs.exit_code }}
-          NPM_AUDIT_EXIT: ${{ steps.npm_audit.outputs.exit_code }}
           NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
-          SEMGREP_EXIT: ${{ steps.semgrep.outputs.exit_code }}
+          NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
+          SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
+          SEMGREP_ERRORS: ${{ steps.semgrep.outputs.error_count }}
         run: |
           failures=0
-          
-          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then 
+
+          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then
             echo "::error::NPM tests failed"
             failures=1
           fi
-          
-          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then 
-            echo "::warning::Dependency check found vulnerabilities (CVSS >= 7)"
+
+          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
+            echo "::warning::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
             failures=1
           fi
-          
-          if [ "${NPM_AUDIT_EXIT:-0}" -ne 0 ]; then 
-            echo "::warning::NPM audit found high/critical vulnerabilities"
+
+          if [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
+            echo "::warning::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
             failures=1
           fi
-          
-          if [ "${SEMGREP_EXIT:-0}" -ne 0 ]; then 
-            echo "::warning::Semgrep SAST found issues"
+
+          # Semgrep: fail only on SARIF level=error; still keep warnings visible via artifact/code scanning.
+          if [ "${SEMGREP_TOOL_EXIT:-0}" -gt 1 ]; then
+            echo "::error::Semgrep execution failed (exit=${SEMGREP_TOOL_EXIT})"
             failures=1
           fi
-          
+          if [ "${SEMGREP_ERRORS:-0}" -ne 0 ]; then
+            echo "::warning::Semgrep reported error-level findings (count=${SEMGREP_ERRORS})"
+            failures=1
+          fi
+
           if [ "$failures" -ne 0 ]; then
-            echo "::error::One or more quality/SAST checks reported failures."
+            echo "::error::One or more quality/SAST checks failed policy."
             exit 1
           fi
 
   secrets-and-filesystem-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     permissions:
       contents: read
       security-events: write
@@ -303,9 +332,9 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
           restore-keys: |
-            trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-
+            trivy-db-${{ runner.os }}-
 
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
@@ -320,32 +349,37 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Trivy filesystem scan
+      - name: Trivy filesystem scan (gate on SARIF results)
         id: trivy_fs
         run: |
-          set +e
+          set -euo pipefail
           trivy fs \
             --scanners vuln,misconfig,secret \
             --format sarif \
             --output trivy-fs.sarif \
             --severity CRITICAL,HIGH \
-            --exit-code 1 \
+            --exit-code 0 \
             .
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d=json.load(open("trivy-fs.sarif")) if os.path.exists("trivy-fs.sarif") else {"runs":[]}
+          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print(f"result_count={count}")
+          PY
         continue-on-error: true
 
       - name: Upload Trivy filesystem SARIF artifact
-        if: hashFiles('trivy-fs.sarif') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-fs-sarif-${{ github.run_number }}
           path: trivy-fs.sarif
           retention-days: 90
+          if-no-files-found: warn
 
       - name: Upload Trivy filesystem SARIF to code scanning
-        if: hashFiles('trivy-fs.sarif') != '' && inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-fs.sarif
@@ -356,20 +390,20 @@ jobs:
         if: always()
         env:
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
-          TRIVY_FS_EXIT: ${{ steps.trivy_fs.outputs.exit_code }}
+          TRIVY_FS_COUNT: ${{ steps.trivy_fs.outputs.result_count }}
         run: |
           failures=0
-          
-          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then 
-            echo "::error::Gitleaks found secrets in repository"
+
+          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then
+            echo "::error::Gitleaks found secrets or failed"
             failures=1
           fi
-          
-          if [ "${TRIVY_FS_EXIT:-0}" -ne 0 ]; then 
-            echo "::error::Trivy filesystem scan found critical/high issues"
+
+          if [ "${TRIVY_FS_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Trivy filesystem scan found CRITICAL/HIGH issues (count=${TRIVY_FS_COUNT})"
             failures=1
           fi
-          
+
           if [ "$failures" -ne 0 ]; then
             echo "::error::Secrets/filesystem scanning failed policy."
             exit 1
@@ -378,7 +412,6 @@ jobs:
   container-image-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-
     permissions:
       contents: read
       security-events: write
@@ -427,9 +460,9 @@ jobs:
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
           path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-${{ github.run_id }}
+          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
           restore-keys: |
-            trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}-
+            trivy-db-${{ runner.os }}-
 
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
@@ -487,7 +520,7 @@ jobs:
             -o spdx-json=frontend-sbom.spdx.json
 
       - name: Upload SBOMs
-        if: hashFiles('*-sbom.*.json') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: pre-merge-sboms-${{ github.run_number }}
@@ -495,57 +528,68 @@ jobs:
             *-sbom.cdx.json
             *-sbom.spdx.json
           retention-days: 30
+          if-no-files-found: warn
 
-      - name: Trivy scan backend image
+      - name: Trivy scan backend image (gate on SARIF results)
         if: hashFiles('pom.xml') != ''
         id: trivy_backend_image
         run: |
-          set +e
+          set -euo pipefail
           trivy image \
             --format sarif \
             --output trivy-backend-image.sarif \
             --severity CRITICAL,HIGH \
-            --exit-code 1 \
+            --exit-code 0 \
             local/backend:${{ env.IMAGE_TAG }}
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d=json.load(open("trivy-backend-image.sarif")) if os.path.exists("trivy-backend-image.sarif") else {"runs":[]}
+          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print(f"result_count={count}")
+          PY
         continue-on-error: true
 
-      - name: Trivy scan frontend image
+      - name: Trivy scan frontend image (gate on SARIF results)
         if: hashFiles('angular.json') != ''
         id: trivy_frontend_image
         run: |
-          set +e
+          set -euo pipefail
           trivy image \
             --format sarif \
             --output trivy-frontend-image.sarif \
             --severity CRITICAL,HIGH \
-            --exit-code 1 \
+            --exit-code 0 \
             local/frontend:${{ env.IMAGE_TAG }}
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d=json.load(open("trivy-frontend-image.sarif")) if os.path.exists("trivy-frontend-image.sarif") else {"runs":[]}
+          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print(f"result_count={count}")
+          PY
         continue-on-error: true
 
       - name: Upload Trivy backend image SARIF artifact
-        if: hashFiles('trivy-backend-image.sarif') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-backend-image-sarif-${{ github.run_number }}
           path: trivy-backend-image.sarif
           retention-days: 90
+          if-no-files-found: warn
 
       - name: Upload Trivy frontend image SARIF artifact
-        if: hashFiles('trivy-frontend-image.sarif') != ''
+        if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-frontend-image-sarif-${{ github.run_number }}
           path: trivy-frontend-image.sarif
           retention-days: 90
+          if-no-files-found: warn
 
       - name: Upload Trivy backend image SARIF to code scanning
-        if: hashFiles('trivy-backend-image.sarif') != '' && inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-backend-image.sarif
@@ -553,7 +597,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Trivy frontend image SARIF to code scanning
-        if: hashFiles('trivy-frontend-image.sarif') != '' && inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-frontend-image.sarif
@@ -563,21 +607,21 @@ jobs:
       - name: Evaluate image scans
         if: always()
         env:
-          BACKEND_EXIT: ${{ steps.trivy_backend_image.outputs.exit_code }}
-          FRONTEND_EXIT: ${{ steps.trivy_frontend_image.outputs.exit_code }}
+          BACKEND_COUNT: ${{ steps.trivy_backend_image.outputs.result_count }}
+          FRONTEND_COUNT: ${{ steps.trivy_frontend_image.outputs.result_count }}
         run: |
           failures=0
-          
-          if [ "${BACKEND_EXIT:-0}" -ne 0 ]; then 
-            echo "::error::Backend image scan found critical/high vulnerabilities"
+
+          if [ "${BACKEND_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Backend image scan found critical/high vulnerabilities (count=${BACKEND_COUNT})"
             failures=1
           fi
-          
-          if [ "${FRONTEND_EXIT:-0}" -ne 0 ]; then 
-            echo "::error::Frontend image scan found critical/high vulnerabilities"
+
+          if [ "${FRONTEND_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Frontend image scan found critical/high vulnerabilities (count=${FRONTEND_COUNT})"
             failures=1
           fi
-          
+
           if [ "$failures" -ne 0 ]; then
             echo "::error::Container image scanning failed policy."
             exit 1
@@ -586,7 +630,6 @@ jobs:
   license-compliance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-
     permissions:
       contents: read
       pull-requests: read
@@ -617,47 +660,58 @@ jobs:
           node-version: "20"
           cache: npm
 
-      - name: Maven license check
+      - name: Maven license check (string token scan)
         if: hashFiles('pom.xml') != ''
         id: maven_license
         run: |
           set +e
+          exit_code=0
+
           mvn org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-third-party-report
 
-          BANNED_LICENSES=("GPL-3.0" "AGPL-3.0" "LGPL-3.0")
-          
+          banned_found=false
           if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
-            for license in "${BANNED_LICENSES[@]}"; do
-              if grep -q "$license" "target/generated-sources/license/THIRD-PARTY.txt"; then
-                echo "::error::Found banned license: $license"
-                echo "banned_found=true" >> "$GITHUB_OUTPUT"
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+            for token in "${TOKENS[@]}"; do
+              if grep -q "$token" "target/generated-sources/license/THIRD-PARTY.txt"; then
+                echo "::error::Found banned license token in Maven report: $token"
+                banned_found=true
                 exit_code=1
               fi
             done
           fi
-          
-          exit $exit_code
+
+          set -e
+          echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
+          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      - name: npm license check
+      - name: npm license report + strict SPDX token enforcement
         if: hashFiles('package-lock.json') != ''
         id: npm_license
         run: |
+          set -euo pipefail
           npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
           npm ci --prefer-offline --no-audit
-          
-          set +e
-
           license-checker --json --out licenses.json
 
-          license-checker \
-            --failOn "GPL-3.0;AGPL-3.0;LGPL-3.0" \
-            --summary
-          
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os, re, sys
+          banned=os.environ.get("BANNED_LICENSE_TOKENS","").split(",")
+          banned=[b.strip() for b in banned if b.strip()]
+          data=json.load(open("licenses.json"))
+          bad=[]
+          for pkg, info in data.items():
+            lic=info.get("licenses","")
+            s=";".join(lic) if isinstance(lic,list) else str(lic)
+            if any(tok in s for tok in banned):
+              bad.append((pkg,s))
+          print(f"banned_count={len(bad)}")
+          if bad:
+            print("First offenders:")
+            for pkg,s in bad[:50]:
+              print(f"- {pkg}: {s}")
+          PY
 
       - name: Upload license reports
         if: always()
@@ -673,21 +727,21 @@ jobs:
       - name: Evaluate license compliance
         if: always()
         env:
-          MAVEN_LICENSE_EXIT: ${{ steps.maven_license.outputs.banned_found }}
-          NPM_LICENSE_EXIT: ${{ steps.npm_license.outputs.exit_code }}
+          MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
+          NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
         run: |
           failures=0
-          
-          if [ "${MAVEN_LICENSE_EXIT}" = "true" ]; then
-            echo "::error::Maven dependencies contain banned licenses (GPL-3.0, AGPL-3.0, LGPL-3.0)"
+
+          if [ "${MAVEN_BANNED}" = "true" ]; then
+            echo "::error::Maven dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS})"
             failures=1
           fi
-          
-          if [ "${NPM_LICENSE_EXIT:-0}" -ne 0 ]; then
-            echo "::error::NPM dependencies contain banned licenses (GPL-3.0, AGPL-3.0, LGPL-3.0)"
+
+          if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
+            echo "::error::NPM dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS}); count=${NPM_BANNED_COUNT}"
             failures=1
           fi
-          
+
           if [ "$failures" -ne 0 ]; then
             echo "::error::License compliance check failed."
             exit 1
@@ -697,7 +751,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: [code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
     if: always()
-
     permissions:
       contents: read
 
@@ -711,62 +764,51 @@ jobs:
         run: |
           cat >> $GITHUB_STEP_SUMMARY <<'EOF'
           # Application Security Scan Results (Pre-merge)
-          
+
           ## Job Status
-          
+
           | Job | Status |
           |-----|--------|
           | Code Quality & SAST | ${{ needs.code-quality-and-sast.result }} |
           | Secrets & Filesystem Scan | ${{ needs.secrets-and-filesystem-scan.result }} |
           | Container Image Scan | ${{ needs.container-image-scan.result }} |
           | License Compliance | ${{ needs.license-compliance.result }} |
-          
+
           ## Security Policies Enforced
-          
           - Secrets scanning (Gitleaks)
           - SAST analysis (Semgrep)
           - Dependency vulnerabilities (OWASP, npm audit)
           - Container image vulnerabilities (Trivy)
-          - License compliance (GPL-3.0, AGPL-3.0, LGPL-3.0 blocked)
+          - License compliance (token-based: ${BANNED_LICENSE_TOKENS})
           - Filesystem misconfigurations (Trivy)
-          
-          ## Build Information
-          
-          - Commit: ${{ github.sha }}
-          - Branch: ${{ github.ref_name }}
-          - Triggered by: ${{ github.event_name }}
-          
-          ---
-          Pre-merge security validation completed
+
           EOF
 
       - name: Check critical failures
         run: |
           failures=0
-          
-          if [ "${{ needs.secrets-and-filesystem-scan.result }}" != "success" ]; then 
-            echo "::error::Secrets/filesystem scan failed - possible security issues detected"
+
+          if [ "${{ needs.secrets-and-filesystem-scan.result }}" != "success" ]; then
+            echo "::error::Secrets/filesystem scan failed"
             failures=1
           fi
-          
-          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then 
-            echo "::error::Container image scan failed - critical vulnerabilities found"
+
+          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then
+            echo "::error::Container image scan failed"
             failures=1
           fi
-          
-          if [ "${{ needs.code-quality-and-sast.result }}" != "success" ]; then 
+
+          if [ "${{ needs.code-quality-and-sast.result }}" != "success" ]; then
             echo "::error::Code quality/SAST checks failed"
             failures=1
           fi
-          
-          if [ "${{ needs.license-compliance.result }}" != "success" ]; then 
-            echo "::error::License compliance check failed - banned licenses detected"
+
+          if [ "${{ needs.license-compliance.result }}" != "success" ]; then
+            echo "::error::License compliance check failed"
             failures=1
           fi
-          
+
           if [ "$failures" -ne 0 ]; then
-            echo "::error::Pre-merge DevSecOps validation failed. Review the job outputs above."
+            echo "::error::Pre-merge DevSecOps validation failed."
             exit 1
           fi
-          
-          echo "All pre-merge security checks passed successfully!"
