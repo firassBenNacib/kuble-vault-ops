@@ -168,7 +168,7 @@ jobs:
         run: npm run build -- --configuration=production
 
       - name: Upload npm audit results
-        if: always()
+        if: hashFiles('angular.json') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-audit-${{ github.run_number }}
@@ -177,7 +177,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload npm test log
-        if: always()
+        if: hashFiles('angular.json') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-test-log-${{ github.run_number }}
@@ -580,7 +580,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload Trivy frontend image SARIF artifact
-        if: always()
+        if: hashFiles('trivy-frontend-image.sarif') != ''
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-frontend-image-sarif-${{ github.run_number }}
