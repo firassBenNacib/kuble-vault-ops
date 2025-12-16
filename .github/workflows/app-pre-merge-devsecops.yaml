@@ -21,11 +21,132 @@ env:
   DEPENDENCY_CHECK_VERSION: '12.1.9'
   NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
   BANNED_LICENSE_TOKENS: 'GPL-3.0,AGPL-3.0,LGPL-3.0'
+  TRIVY_SEVERITY: 'CRITICAL,HIGH'
 
 jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_backend: ${{ steps.detect.outputs.has_backend }}
+      backend_dir: ${{ steps.detect.outputs.backend_dir }}
+      has_frontend: ${{ steps.detect.outputs.has_frontend }}
+      frontend_dir: ${{ steps.detect.outputs.frontend_dir }}
+
+      build_backend_image: ${{ steps.detect.outputs.build_backend_image }}
+      backend_image_context: ${{ steps.detect.outputs.backend_image_context }}
+      backend_image_dockerfile: ${{ steps.detect.outputs.backend_image_dockerfile }}
+
+      build_frontend_image: ${{ steps.detect.outputs.build_frontend_image }}
+      frontend_image_context: ${{ steps.detect.outputs.frontend_image_context }}
+      frontend_image_dockerfile: ${{ steps.detect.outputs.frontend_image_dockerfile }}
+
+      build_any_image: ${{ steps.detect.outputs.build_any_image }}
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Detect project layout (backend/frontend + dockerfiles)
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # --- backend detection (common dirs) ---
+          has_backend=false
+          backend_dir="."
+          for d in "." "backend" "api" "server"; do
+            if [ -f "$d/pom.xml" ]; then
+              has_backend=true
+              backend_dir="$d"
+              break
+            fi
+          done
+
+          # --- frontend detection (common dirs) ---
+          has_frontend=false
+          frontend_dir="."
+          for d in "." "frontend" "client" "web" "ui"; do
+            if [ -f "$d/package-lock.json" ]; then
+              has_frontend=true
+              frontend_dir="$d"
+              break
+            fi
+          done
+
+          # --- dockerfile detection ---
+          build_backend_image=false
+          backend_image_context=""
+          backend_image_dockerfile=""
+
+          if [ "$has_backend" = "true" ]; then
+            if [ -f "$backend_dir/Dockerfile" ]; then
+              build_backend_image=true
+              backend_image_context="$backend_dir"
+              backend_image_dockerfile="Dockerfile"
+            elif [ -f "Dockerfile.backend" ]; then
+              build_backend_image=true
+              backend_image_context="."
+              backend_image_dockerfile="Dockerfile.backend"
+            elif [ -f "Dockerfile" ] && [ "$has_frontend" = "false" ]; then
+              build_backend_image=true
+              backend_image_context="."
+              backend_image_dockerfile="Dockerfile"
+            fi
+          fi
+
+          build_frontend_image=false
+          frontend_image_context=""
+          frontend_image_dockerfile=""
+
+          if [ "$has_frontend" = "true" ]; then
+            if [ -f "$frontend_dir/Dockerfile" ]; then
+              build_frontend_image=true
+              frontend_image_context="$frontend_dir"
+              frontend_image_dockerfile="Dockerfile"
+            elif [ -f "Dockerfile.frontend" ]; then
+              build_frontend_image=true
+              frontend_image_context="."
+              frontend_image_dockerfile="Dockerfile.frontend"
+            elif [ -f "Dockerfile" ] && [ "$has_backend" = "false" ]; then
+              build_frontend_image=true
+              frontend_image_context="."
+              frontend_image_dockerfile="Dockerfile"
+            fi
+          fi
+
+          build_any_image=false
+          if [ "$build_backend_image" = "true" ] || [ "$build_frontend_image" = "true" ]; then
+            build_any_image=true
+          fi
+
+          {
+            echo "has_backend=$has_backend"
+            echo "backend_dir=$backend_dir"
+            echo "has_frontend=$has_frontend"
+            echo "frontend_dir=$frontend_dir"
+
+            echo "build_backend_image=$build_backend_image"
+            echo "backend_image_context=$backend_image_context"
+            echo "backend_image_dockerfile=$backend_image_dockerfile"
+
+            echo "build_frontend_image=$build_frontend_image"
+            echo "frontend_image_context=$frontend_image_context"
+            echo "frontend_image_dockerfile=$frontend_image_dockerfile"
+
+            echo "build_any_image=$build_any_image"
+          } >> "$GITHUB_OUTPUT"
+
   code-quality-and-sast:
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    needs: [detect]
     permissions:
       contents: read
       security-events: write
@@ -45,20 +166,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Set up JDK for backend
-        if: hashFiles('pom.xml') != ''
+      - name: Set up JDK (backend)
+        if: needs.detect.outputs.has_backend == 'true'
         uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - name: Set up Node.js for frontend
-        if: hashFiles('package-lock.json') != ''
+      - name: Set up Node.js (frontend)
+        if: needs.detect.outputs.has_frontend == 'true'
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: "20"
           cache: npm
+          cache-dependency-path: |
+            **/package-lock.json
 
       - name: Check jq availability for Trunk
         if: hashFiles('.trunk/trunk.yaml') != ''
@@ -75,13 +198,14 @@ jobs:
         continue-on-error: true
 
       - name: Maven build and tests
-        if: hashFiles('pom.xml') != ''
-        run: mvn -B clean verify -DskipTests=false
+        if: needs.detect.outputs.has_backend == 'true'
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: mvn -B -ntp clean verify -DskipTests=false
         env:
           MAVEN_OPTS: "-Xmx2048m"
 
       - name: Cache OWASP Dependency-Check data
-        if: hashFiles('pom.xml') != ''
+        if: needs.detect.outputs.has_backend == 'true'
         id: depcheck_cache
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
@@ -91,8 +215,9 @@ jobs:
             depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
       - name: Maven dependency check
-        if: hashFiles('pom.xml') != ''
+        if: needs.detect.outputs.has_backend == 'true'
         id: depcheck
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
           set +e
           mkdir -p "${DEPENDENCY_CHECK_DATA}"
@@ -117,7 +242,7 @@ jobs:
             SUPPRESS_ARG="-DsuppressionFiles=dependency-check-suppressions.xml"
           fi
 
-          mvn org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
+          mvn -B -ntp org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
             -DfailBuildOnCVSS=7 \
             -DdataDirectory="${DEPENDENCY_CHECK_DATA}" \
             -DautoUpdate="${AUTO_UPDATE}" \
@@ -131,12 +256,14 @@ jobs:
         continue-on-error: true
 
       - name: npm install
-        if: hashFiles('package-lock.json') != ''
+        if: needs.detect.outputs.has_frontend == 'true'
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: npm ci --prefer-offline --no-audit
 
       - name: npm audit (gate on parsed JSON)
-        if: hashFiles('package-lock.json') != ''
+        if: needs.detect.outputs.has_frontend == 'true'
         id: npm_audit
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
           npm audit --audit-level=high --json > npm-audit.json || true
@@ -153,8 +280,9 @@ jobs:
           PY
 
       - name: npm tests (skip if script missing)
-        if: hashFiles('package-lock.json') != ''
+        if: needs.detect.outputs.has_frontend == 'true'
         id: npm_tests
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set +e
           npm run test:ci --if-present 2>&1 | tee npm-test.log
@@ -163,39 +291,80 @@ jobs:
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      - name: Angular production build
-        if: hashFiles('angular.json') != ''
-        run: npm run build -- --configuration=production
+      - name: Frontend production build (Angular if present, else generic)
+        if: needs.detect.outputs.has_frontend == 'true'
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        run: |
+          set -e
+          if [ -f "angular.json" ]; then
+            npm run build -- --configuration=production
+          else
+            npm run build --if-present
+          fi
+
+      - name: Check npm artifacts exist
+        if: always()
+        id: npm_artifacts
+        run: |
+          set -euo pipefail
+          audit_exists=false
+          test_exists=false
+
+          if [ "${{ needs.detect.outputs.has_frontend }}" = "true" ]; then
+            if [ -f "${{ needs.detect.outputs.frontend_dir }}/npm-audit.json" ]; then audit_exists=true; fi
+            if [ -f "${{ needs.detect.outputs.frontend_dir }}/npm-test.log" ]; then test_exists=true; fi
+          fi
+
+          echo "audit_exists=$audit_exists" >> "$GITHUB_OUTPUT"
+          echo "test_exists=$test_exists" >> "$GITHUB_OUTPUT"
 
       - name: Upload npm audit results
-        if: hashFiles('angular.json') != ''
+        if: steps.npm_artifacts.outputs.audit_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-audit-${{ github.run_number }}
-          path: npm-audit.json
+          path: ${{ needs.detect.outputs.frontend_dir }}/npm-audit.json
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload npm test log
-        if: hashFiles('angular.json') != ''
+        if: steps.npm_artifacts.outputs.test_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: npm-test-log-${{ github.run_number }}
-          path: npm-test.log
+          path: ${{ needs.detect.outputs.frontend_dir }}/npm-test.log
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: ignore
+
+      - name: Check dependency-check reports exist
+        if: always()
+        id: depcheck_reports
+        run: |
+          set -euo pipefail
+          exists=false
+          if [ "${{ needs.detect.outputs.has_backend }}" = "true" ]; then
+            base="${{ needs.detect.outputs.backend_dir }}"
+            for f in \
+              "$base/target/dependency-check-report.html" \
+              "$base/target/dependency-check-report.json" \
+              "$base/target/dependency-check-report.sarif"
+            do
+              if [ -f "$f" ]; then exists=true; fi
+            done
+          fi
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
 
       - name: Upload dependency-check reports
-        if: hashFiles('pom.xml') != ''
+        if: steps.depcheck_reports.outputs.exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dependency-check-${{ github.run_number }}
           path: |
-            target/dependency-check-report.html
-            target/dependency-check-report.json
-            target/dependency-check-report.sarif
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.html
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.json
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.sarif
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Install Semgrep
         run: |
@@ -209,7 +378,7 @@ jobs:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
           set +e
-          if [ -n "$SEMGREP_APP_TOKEN" ]; then
+          if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
             semgrep ci --sarif --output semgrep.sarif
           else
             semgrep scan --config p/ci --sarif --output semgrep.sarif
@@ -221,29 +390,28 @@ jobs:
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           if not os.path.exists("semgrep.sarif"):
-            print("error_count=0"); print("warning_count=0"); raise SystemExit(0)
+            print("sarif_exists=false"); print("error_count=0"); raise SystemExit(0)
           d=json.load(open("semgrep.sarif"))
           results=[]
           for run in d.get("runs",[]):
             results += run.get("results",[]) or []
           err=sum(1 for r in results if (r.get("level") or "").lower()=="error")
-          warn=sum(1 for r in results if (r.get("level") or "").lower()=="warning")
+          print("sarif_exists=true")
           print(f"error_count={err}")
-          print(f"warning_count={warn}")
           PY
         continue-on-error: true
 
       - name: Upload Semgrep SARIF artifact
-        if: always()
+        if: steps.semgrep.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: semgrep-sarif-${{ github.run_number }}
           path: semgrep.sarif
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload Semgrep SARIF to code scanning
-        if: inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true && steps.semgrep.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: semgrep.sarif
@@ -274,25 +442,26 @@ jobs:
           NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
           SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
           SEMGREP_ERRORS: ${{ steps.semgrep.outputs.error_count }}
+          HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
+          HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
         run: |
           failures=0
 
-          if [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then
             echo "::error::NPM tests failed"
             failures=1
           fi
 
-          if [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
+          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
             echo "::warning::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
             failures=1
           fi
 
-          if [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
             echo "::warning::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
             failures=1
           fi
 
-          # Semgrep: fail only on SARIF level=error; still keep warnings visible via artifact/code scanning.
           if [ "${SEMGREP_TOOL_EXIT:-0}" -gt 1 ]; then
             echo "::error::Semgrep execution failed (exit=${SEMGREP_TOOL_EXIT})"
             failures=1
@@ -310,6 +479,7 @@ jobs:
   secrets-and-filesystem-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    needs: [detect]
     permissions:
       contents: read
       security-events: write
@@ -328,14 +498,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Cache Trivy DB
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
-          restore-keys: |
-            trivy-db-${{ runner.os }}-
-
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
         with:
@@ -349,37 +511,50 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         continue-on-error: true
 
-      - name: Trivy filesystem scan (gate on SARIF results)
+      - name: Trivy filesystem scan (table in logs + SARIF for upload)
         id: trivy_fs
         run: |
           set -euo pipefail
+
+          echo "== Trivy FS (table output) =="
           trivy fs \
-            --scanners vuln,misconfig,secret \
+            --scanners vuln,misconfig \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            .
+
+          echo "== Trivy FS (SARIF output) =="
+          trivy fs \
+            --scanners vuln,misconfig \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
             --format sarif \
             --output trivy-fs.sarif \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
             .
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           d=json.load(open("trivy-fs.sarif")) if os.path.exists("trivy-fs.sarif") else {"runs":[]}
           count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print("sarif_exists=true" if os.path.exists("trivy-fs.sarif") else "sarif_exists=false")
           print(f"result_count={count}")
           PY
         continue-on-error: true
 
       - name: Upload Trivy filesystem SARIF artifact
-        if: always()
+        if: steps.trivy_fs.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-fs-sarif-${{ github.run_number }}
           path: trivy-fs.sarif
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload Trivy filesystem SARIF to code scanning
-        if: inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true && steps.trivy_fs.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-fs.sarif
@@ -412,6 +587,7 @@ jobs:
   container-image-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    needs: [detect]
     permissions:
       contents: read
       security-events: write
@@ -429,41 +605,6 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up JDK for backend
-        if: hashFiles('pom.xml') != ''
-        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      - name: Set up Node.js for frontend
-        if: hashFiles('package-lock.json') != ''
-        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
-        with:
-          node-version: "20"
-          cache: npm
-
-      - name: Maven build
-        if: hashFiles('pom.xml') != ''
-        run: mvn -B clean package -DskipTests
-        env:
-          MAVEN_OPTS: "-Xmx2048m"
-
-      - name: npm build
-        if: hashFiles('package-lock.json') != ''
-        run: |
-          npm ci --prefer-offline --no-audit
-          npm run build -- --configuration=production
-
-      - name: Cache Trivy DB
-        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
-        with:
-          path: ~/.cache/trivy
-          key: trivy-db-${{ runner.os }}-${{ env.TRIVY_VERSION }}
-          restore-keys: |
-            trivy-db-${{ runner.os }}-
-
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
         with:
@@ -471,17 +612,19 @@ jobs:
           cache: true
 
       - name: Set up QEMU
+        if: needs.detect.outputs.build_any_image == 'true'
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
 
       - name: Set up Docker Buildx
+        if: needs.detect.outputs.build_any_image == 'true'
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - name: Build backend image
-        if: hashFiles('pom.xml') != ''
+        if: needs.detect.outputs.build_backend_image == 'true'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ needs.detect.outputs.backend_image_context }}
+          file: ${{ needs.detect.outputs.backend_image_context }}/${{ needs.detect.outputs.backend_image_dockerfile }}
           push: false
           load: true
           tags: local/backend:${{ env.IMAGE_TAG }}
@@ -489,11 +632,11 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Build frontend image
-        if: hashFiles('angular.json') != ''
+        if: needs.detect.outputs.build_frontend_image == 'true'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
-          context: .
-          file: ./Dockerfile
+          context: ${{ needs.detect.outputs.frontend_image_context }}
+          file: ${{ needs.detect.outputs.frontend_image_context }}/${{ needs.detect.outputs.frontend_image_dockerfile }}
           push: false
           load: true
           tags: local/frontend:${{ env.IMAGE_TAG }}
@@ -501,19 +644,20 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Install Syft
+        if: needs.detect.outputs.build_any_image == 'true'
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/${{ env.SYFT_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
           syft version
 
       - name: Generate backend SBOM
-        if: hashFiles('pom.xml') != ''
+        if: needs.detect.outputs.build_backend_image == 'true'
         run: |
           syft local/backend:${{ env.IMAGE_TAG }} \
             -o cyclonedx-json=backend-sbom.cdx.json \
             -o spdx-json=backend-sbom.spdx.json
 
       - name: Generate frontend SBOM
-        if: hashFiles('angular.json') != ''
+        if: needs.detect.outputs.build_frontend_image == 'true'
         run: |
           syft local/frontend:${{ env.IMAGE_TAG }} \
             -o cyclonedx-json=frontend-sbom.cdx.json \
@@ -528,68 +672,92 @@ jobs:
             *-sbom.cdx.json
             *-sbom.spdx.json
           retention-days: 30
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
-      - name: Trivy scan backend image (gate on SARIF results)
-        if: hashFiles('pom.xml') != ''
+      - name: Trivy scan backend image (table + SARIF)
+        if: needs.detect.outputs.build_backend_image == 'true'
         id: trivy_backend_image
         run: |
           set -euo pipefail
+
+          echo "== Trivy image (backend) - table output =="
           trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            local/backend:${{ env.IMAGE_TAG }}
+
+          echo "== Trivy image (backend) - SARIF output =="
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
             --format sarif \
             --output trivy-backend-image.sarif \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
             local/backend:${{ env.IMAGE_TAG }}
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           d=json.load(open("trivy-backend-image.sarif")) if os.path.exists("trivy-backend-image.sarif") else {"runs":[]}
           count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print("sarif_exists=true" if os.path.exists("trivy-backend-image.sarif") else "sarif_exists=false")
           print(f"result_count={count}")
           PY
         continue-on-error: true
 
-      - name: Trivy scan frontend image (gate on SARIF results)
-        if: hashFiles('angular.json') != ''
+      - name: Trivy scan frontend image (table + SARIF)
+        if: needs.detect.outputs.build_frontend_image == 'true'
         id: trivy_frontend_image
         run: |
           set -euo pipefail
+
+          echo "== Trivy image (frontend) - table output =="
           trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            local/frontend:${{ env.IMAGE_TAG }}
+
+          echo "== Trivy image (frontend) - SARIF output =="
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
             --format sarif \
             --output trivy-frontend-image.sarif \
-            --severity CRITICAL,HIGH \
-            --exit-code 0 \
             local/frontend:${{ env.IMAGE_TAG }}
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           d=json.load(open("trivy-frontend-image.sarif")) if os.path.exists("trivy-frontend-image.sarif") else {"runs":[]}
           count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print("sarif_exists=true" if os.path.exists("trivy-frontend-image.sarif") else "sarif_exists=false")
           print(f"result_count={count}")
           PY
         continue-on-error: true
 
       - name: Upload Trivy backend image SARIF artifact
-        if: hashFiles('trivy-backend-image.sarif') != ''
+        if: steps.trivy_backend_image.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-backend-image-sarif-${{ github.run_number }}
           path: trivy-backend-image.sarif
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload Trivy frontend image SARIF artifact
-        if: hashFiles('trivy-frontend-image.sarif') != ''
+        if: steps.trivy_frontend_image.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: trivy-frontend-image-sarif-${{ github.run_number }}
           path: trivy-frontend-image.sarif
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Upload Trivy backend image SARIF to code scanning
-        if: inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true && steps.trivy_backend_image.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-backend-image.sarif
@@ -597,7 +765,7 @@ jobs:
         continue-on-error: true
 
       - name: Upload Trivy frontend image SARIF to code scanning
-        if: inputs.enable_code_scanning == true
+        if: inputs.enable_code_scanning == true && steps.trivy_frontend_image.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
         with:
           sarif_file: trivy-frontend-image.sarif
@@ -607,17 +775,19 @@ jobs:
       - name: Evaluate image scans
         if: always()
         env:
+          BUILD_BACKEND: ${{ needs.detect.outputs.build_backend_image }}
+          BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
           BACKEND_COUNT: ${{ steps.trivy_backend_image.outputs.result_count }}
           FRONTEND_COUNT: ${{ steps.trivy_frontend_image.outputs.result_count }}
         run: |
           failures=0
 
-          if [ "${BACKEND_COUNT:-0}" -ne 0 ]; then
+          if [ "${BUILD_BACKEND}" = "true" ] && [ "${BACKEND_COUNT:-0}" -ne 0 ]; then
             echo "::error::Backend image scan found critical/high vulnerabilities (count=${BACKEND_COUNT})"
             failures=1
           fi
 
-          if [ "${FRONTEND_COUNT:-0}" -ne 0 ]; then
+          if [ "${BUILD_FRONTEND}" = "true" ] && [ "${FRONTEND_COUNT:-0}" -ne 0 ]; then
             echo "::error::Frontend image scan found critical/high vulnerabilities (count=${FRONTEND_COUNT})"
             failures=1
           fi
@@ -630,6 +800,7 @@ jobs:
   license-compliance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    needs: [detect]
     permissions:
       contents: read
       pull-requests: read
@@ -645,29 +816,32 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up JDK for backend
-        if: hashFiles('pom.xml') != ''
+      - name: Set up JDK (backend)
+        if: needs.detect.outputs.has_backend == 'true'
         uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
         with:
           distribution: temurin
           java-version: "21"
           cache: maven
 
-      - name: Set up Node.js for frontend
-        if: hashFiles('package-lock.json') != ''
+      - name: Set up Node.js (frontend)
+        if: needs.detect.outputs.has_frontend == 'true'
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6.1.0
         with:
           node-version: "20"
           cache: npm
+          cache-dependency-path: |
+            **/package-lock.json
 
       - name: Maven license check (string token scan)
-        if: hashFiles('pom.xml') != ''
+        if: needs.detect.outputs.has_backend == 'true'
         id: maven_license
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
           set +e
           exit_code=0
 
-          mvn org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-third-party-report
+          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-third-party-report
 
           banned_found=false
           if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
@@ -687,8 +861,9 @@ jobs:
         continue-on-error: true
 
       - name: npm license report + strict SPDX token enforcement
-        if: hashFiles('package-lock.json') != ''
+        if: needs.detect.outputs.has_frontend == 'true'
         id: npm_license
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
           npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
@@ -718,17 +893,16 @@ jobs:
               print(f"- {pkg}: {s}")
           PY
 
-
       - name: Upload license reports
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: license-reports-${{ github.run_number }}
           path: |
-            target/generated-sources/license/THIRD-PARTY.txt
-            licenses.json
+            ${{ needs.detect.outputs.backend_dir }}/target/generated-sources/license/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.frontend_dir }}/licenses.json
           retention-days: 90
-          if-no-files-found: warn
+          if-no-files-found: ignore
 
       - name: Evaluate license compliance
         if: always()
@@ -755,7 +929,7 @@ jobs:
 
   security-summary:
     runs-on: ubuntu-latest
-    needs: [code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
+    needs: [detect, code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
     if: always()
     permissions:
       contents: read
@@ -771,8 +945,13 @@ jobs:
           cat >> $GITHUB_STEP_SUMMARY <<'EOF'
           # Application Security Scan Results (Pre-merge)
 
-          ## Job Status
+          ## Detected Components
+          - Backend present: ${{ needs.detect.outputs.has_backend }}
+          - Frontend present: ${{ needs.detect.outputs.has_frontend }}
+          - Backend image build enabled: ${{ needs.detect.outputs.build_backend_image }}
+          - Frontend image build enabled: ${{ needs.detect.outputs.build_frontend_image }}
 
+          ## Job Status
           | Job | Status |
           |-----|--------|
           | Code Quality & SAST | ${{ needs.code-quality-and-sast.result }} |
@@ -786,8 +965,7 @@ jobs:
           - Dependency vulnerabilities (OWASP, npm audit)
           - Container image vulnerabilities (Trivy)
           - License compliance (token-based)
-          - Filesystem misconfigurations (Trivy)
-
+          - Filesystem misconfigurations + vuln (Trivy FS)
           EOF
 
       - name: Check critical failures
