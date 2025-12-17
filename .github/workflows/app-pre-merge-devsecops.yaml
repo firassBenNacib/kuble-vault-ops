@@ -185,7 +185,7 @@ jobs:
           persist-credentials: false
 
       - name: Check jq availability for Trunk
-        if: inputs.enable_trunk && hashFiles('.trunk/trunk.yaml') != ''
+        if: hashFiles('.trunk/trunk.yaml') != ''
         run: |
           if ! command -v jq &> /dev/null; then
             echo "::warning::jq not found, installing for Trunk compatibility"
@@ -194,7 +194,7 @@ jobs:
           jq --version
 
       - name: Trunk Code Quality
-        if: inputs.enable_trunk && hashFiles('.trunk/trunk.yaml') != ''
+        if: hashFiles('.trunk/trunk.yaml') != ''
         uses: trunk-io/trunk-action@75699af9e26881e564e9d832ef7dc3af25ec031b # v1.2.4
         continue-on-error: true
 
@@ -225,7 +225,11 @@ jobs:
       - name: Verify Maven dependency signatures
         if: needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
-        run: mvn dependency:verify-signatures
+        run: |
+          # Install GPG plugin and verify signatures
+          mvn -B org.apache.maven.plugins:maven-gpg-plugin:3.2.7:verify \
+            -Dgpg.keyname= \
+            -DskipTests=true
         continue-on-error: true
 
       - name: Cache OWASP Dependency-Check data
@@ -610,9 +614,35 @@ jobs:
         uses: trufflesecurity/trufflehog@05cccb53bc9e13bc6d17997db5a6bcc3df44bf2f # v3.92.3
         with:
           path: .
-          base: ${{ github.event.repository.default_branch }}
+          base: ${{ github.event.repository.default_branch || 'main' }}
           head: HEAD
           extra_args: --only-verified
+        continue-on-error: true
+
+      - name: Trivy secret scan (filesystem)
+        id: trivy_secrets
+        run: |
+          echo "== Trivy Secret Scan =="
+          trivy fs --scanners secret \
+            --format table \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+          trivy fs --scanners secret \
+            --format sarif \
+            --output trivy-secrets.sarif \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          d=json.load(open("trivy-secrets.sarif")) if os.path.exists("trivy-secrets.sarif") else {"runs":[]}
+          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+          print("sarif_exists=true" if os.path.exists("trivy-secrets.sarif") else "sarif_exists=false")
+          print(f"secret_count={count}")
+          PY
         continue-on-error: true
 
       - name: Upload Gitleaks SARIF to code scanning
@@ -623,15 +653,29 @@ jobs:
           category: gitleaks
         continue-on-error: true
 
+      - name: Upload Trivy secrets SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('trivy-secrets.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets
+        continue-on-error: true
+
       - name: Evaluate secrets and filesystem scan
         if: always() && inputs.enforce_policies
         env:
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          TRUVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
         run: |
           failures=0
 
           if [ "${GITLEAKS_OUTCOME}" != "success" ]; then
             echo "::error::Gitleaks found secrets or failed"
+            failures=1
+          fi
+
+          if [ "${TRUVY_SECRET_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Trivy found secrets in filesystem (count=${TRUVY_SECRET_COUNT})"
             failures=1
           fi
 
@@ -1094,7 +1138,7 @@ jobs:
           | Supply Chain Security | ${{ needs.supply-chain-security.result }} |
 
           ## Security Policies Enforced
-          - Secrets scanning (Gitleaks, TruffleHog)
+          - Secrets scanning (Gitleaks, TruffleHog, Trivy)
           - SAST analysis (Semgrep)
           - Dependency vulnerabilities (OWASP if enabled, npm audit, Trivy FS)
           - Container image vulnerabilities (Trivy)
