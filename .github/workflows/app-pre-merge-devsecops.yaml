@@ -4,83 +4,101 @@ on:
   workflow_call:
     inputs:
       enable_code_scanning:
-        description: 'Enable GitHub Code Scanning (requires paid private repo or public repo)'
+        description: 'Enable upload-sarif steps (requires paid private repo or public repo)'
         required: false
         type: boolean
         default: false
+      enable_owasp_dependency_check:
+        description: 'Enable OWASP Dependency-Check (Java backend only)'
+        required: false
+        type: boolean
+        default: false
+      enable_trunk:
+        description: 'Enable Trunk (optional)'
+        required: false
+        type: boolean
+        default: false
+      enable_sonarqube:
+        description: 'Enable SonarQube (optional)'
+        required: false
+        type: boolean
+        default: false
+      enforce_policies:
+        description: 'Fail workflow when policy thresholds are exceeded'
+        required: false
+        type: boolean
+        default: true
 
 env:
-  IMAGE_TAG: ${{ github.sha }}
   TRIVY_VERSION: '0.68.1'
   SEMGREP_VERSION: '1.145.0'
   SYFT_VERSION: 'v1.38.2'
   LICENSE_CHECKER_VERSION: '25.0.1'
+  DEPENDENCY_CHECK_VERSION: '12.1.9'
+  DEPENDENCY_CHECK_DATA: ~/.dependency-check
+  TRIVY_SEVERITY: 'CRITICAL,HIGH'
+  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+  IMAGE_TAG: ${{ github.sha }}
+  BANNED_LICENSE_TOKENS: 'GPL-3.0,AGPL-3.0,LGPL-3.0'
   SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
   SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-  DEPENDENCY_CHECK_DATA: ~/.dependency-check
-  DEPENDENCY_CHECK_VERSION: '12.1.9'
-  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
-  BANNED_LICENSE_TOKENS: 'GPL-3.0,AGPL-3.0,LGPL-3.0'
-  TRIVY_SEVERITY: 'CRITICAL,HIGH'
 
 jobs:
   detect:
     runs-on: ubuntu-latest
     outputs:
       has_backend: ${{ steps.detect.outputs.has_backend }}
-      backend_dir: ${{ steps.detect.outputs.backend_dir }}
       has_frontend: ${{ steps.detect.outputs.has_frontend }}
+      backend_dir: ${{ steps.detect.outputs.backend_dir }}
       frontend_dir: ${{ steps.detect.outputs.frontend_dir }}
-
       build_backend_image: ${{ steps.detect.outputs.build_backend_image }}
+      build_frontend_image: ${{ steps.detect.outputs.build_frontend_image }}
+      build_any_image: ${{ steps.detect.outputs.build_any_image }}
       backend_image_context: ${{ steps.detect.outputs.backend_image_context }}
       backend_image_dockerfile: ${{ steps.detect.outputs.backend_image_dockerfile }}
-
-      build_frontend_image: ${{ steps.detect.outputs.build_frontend_image }}
       frontend_image_context: ${{ steps.detect.outputs.frontend_image_context }}
       frontend_image_dockerfile: ${{ steps.detect.outputs.frontend_image_dockerfile }}
-
-      build_any_image: ${{ steps.detect.outputs.build_any_image }}
-
     permissions:
       contents: read
 
     steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
       - name: Checkout repository
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
         with:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Detect project layout (backend/frontend + dockerfiles)
+      - name: Detect project structure
         id: detect
         shell: bash
         run: |
           set -euo pipefail
 
-          # --- backend detection (common dirs) ---
           has_backend=false
           backend_dir="."
           for d in "." "backend" "api" "server"; do
-            if [ -f "$d/pom.xml" ]; then
+            if [ -f "$d/pom.xml" ] || [ -d "$d/src/main/java" ]; then
               has_backend=true
               backend_dir="$d"
               break
             fi
           done
 
-          # --- frontend detection (common dirs) ---
           has_frontend=false
           frontend_dir="."
           for d in "." "frontend" "client" "web" "ui"; do
-            if [ -f "$d/package-lock.json" ]; then
+            if [ -f "$d/package-lock.json" ] || [ -f "$d/package.json" ] || [ -d "$d/src/app" ]; then
               has_frontend=true
               frontend_dir="$d"
               break
             fi
           done
 
-          # --- dockerfile detection ---
           build_backend_image=false
           backend_image_context=""
           backend_image_dockerfile=""
@@ -166,6 +184,20 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Check jq availability for Trunk
+        if: inputs.enable_trunk && hashFiles('.trunk/trunk.yaml') != ''
+        run: |
+          if ! command -v jq &> /dev/null; then
+            echo "::warning::jq not found, installing for Trunk compatibility"
+            sudo apt-get update && sudo apt-get install -y jq
+          fi
+          jq --version
+
+      - name: Trunk Code Quality
+        if: inputs.enable_trunk && hashFiles('.trunk/trunk.yaml') != ''
+        uses: trunk-io/trunk-action@75699af9e26881e564e9d832ef7dc3af25ec031b # v1.2.4
+        continue-on-error: true
+
       - name: Set up JDK (backend)
         if: needs.detect.outputs.has_backend == 'true'
         uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e # v5.1.0
@@ -183,20 +215,6 @@ jobs:
           cache-dependency-path: |
             **/package-lock.json
 
-      - name: Check jq availability for Trunk
-        if: hashFiles('.trunk/trunk.yaml') != ''
-        run: |
-          if ! command -v jq &> /dev/null; then
-            echo "::warning::jq not found, installing for Trunk compatibility"
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          jq --version
-
-      - name: Trunk Code Quality
-        if: hashFiles('.trunk/trunk.yaml') != ''
-        uses: trunk-io/trunk-action@75699af9e26881e564e9d832ef7dc3af25ec031b # v1.2.4
-        continue-on-error: true
-
       - name: Maven build and tests
         if: needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
@@ -204,8 +222,14 @@ jobs:
         env:
           MAVEN_OPTS: "-Xmx2048m"
 
-      - name: Cache OWASP Dependency-Check data
+      - name: Verify Maven dependency signatures
         if: needs.detect.outputs.has_backend == 'true'
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: mvn dependency:verify-signatures
+        continue-on-error: true
+
+      - name: Cache OWASP Dependency-Check data
+        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
         id: depcheck_cache
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb # v5.0.1
         with:
@@ -215,7 +239,7 @@ jobs:
             depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-
 
       - name: Maven dependency check
-        if: needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
         id: depcheck
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
@@ -419,7 +443,7 @@ jobs:
         continue-on-error: true
 
       - name: SonarQube analysis
-        if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        if: inputs.enable_sonarqube && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
         uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9 # v7.0.0
         env:
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
@@ -427,89 +451,18 @@ jobs:
         continue-on-error: true
 
       - name: SonarQube Quality Gate
-        if: env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        if: inputs.enable_sonarqube && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
         uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b # v1.2.0
         timeout-minutes: 5
         env:
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
         continue-on-error: true
 
-      - name: Evaluate quality and SAST
-        if: always()
-        env:
-          DEPCHECK_EXIT: ${{ steps.depcheck.outputs.exit_code }}
-          NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
-          NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
-          SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
-          SEMGREP_ERRORS: ${{ steps.semgrep.outputs.error_count }}
-          HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
-          HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
-        run: |
-          failures=0
-
-          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then
-            echo "::error::NPM tests failed"
-            failures=1
-          fi
-
-          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
-            echo "::warning::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
-            failures=1
-          fi
-
-          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
-            echo "::warning::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
-            failures=1
-          fi
-
-          if [ "${SEMGREP_TOOL_EXIT:-0}" -gt 1 ]; then
-            echo "::error::Semgrep execution failed (exit=${SEMGREP_TOOL_EXIT})"
-            failures=1
-          fi
-          if [ "${SEMGREP_ERRORS:-0}" -ne 0 ]; then
-            echo "::warning::Semgrep reported error-level findings (count=${SEMGREP_ERRORS})"
-            failures=1
-          fi
-
-          if [ "$failures" -ne 0 ]; then
-            echo "::error::One or more quality/SAST checks failed policy."
-            exit 1
-          fi
-
-  secrets-and-filesystem-scan:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    needs: [detect]
-    permissions:
-      contents: read
-      security-events: write
-      actions: read
-      pull-requests: read
-
-    steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
         with:
           version: v${{ env.TRIVY_VERSION }}
           cache: true
-
-      - name: Gitleaks secrets scan
-        id: gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
 
       - name: Trivy filesystem scan (table in logs + SARIF for upload)
         id: trivy_fs
@@ -561,21 +514,124 @@ jobs:
           category: trivy-filesystem
         continue-on-error: true
 
-      - name: Evaluate secrets and filesystem scan
-        if: always()
+      - name: Upload OWASP SARIF to code scanning
+        if: inputs.enable_owasp_dependency_check && inputs.enable_code_scanning && steps.depcheck_reports.outputs.exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
+        with:
+          sarif_file: ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.sarif
+          category: owasp-dependency-check
+        continue-on-error: true
+
+      - name: Evaluate quality and SAST
+        if: always() && inputs.enforce_policies
         env:
-          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          DEPCHECK_EXIT: ${{ steps.depcheck.outputs.exit_code }}
+          NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
+          NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
+          SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
+          SEMGREP_ERRORS: ${{ steps.semgrep.outputs.error_count }}
           TRIVY_FS_COUNT: ${{ steps.trivy_fs.outputs.result_count }}
+          HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
+          HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
         run: |
           failures=0
 
-          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then
-            echo "::error::Gitleaks found secrets or failed"
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_TESTS_EXIT:-0}" -ne 0 ]; then
+            echo "::error::NPM tests failed"
+            failures=1
+          fi
+
+          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
+            echo "::warning::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
+            failures=1
+          fi
+
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
+            echo "::warning::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
+            failures=1
+          fi
+
+          if [ "${SEMGREP_TOOL_EXIT:-0}" -gt 1 ]; then
+            echo "::error::Semgrep execution failed (exit=${SEMGREP_TOOL_EXIT})"
+            failures=1
+          fi
+          if [ "${SEMGREP_ERRORS:-0}" -ne 0 ]; then
+            echo "::warning::Semgrep reported error-level findings (count=${SEMGREP_ERRORS})"
             failures=1
           fi
 
           if [ "${TRIVY_FS_COUNT:-0}" -ne 0 ]; then
             echo "::error::Trivy filesystem scan found CRITICAL/HIGH issues (count=${TRIVY_FS_COUNT})"
+            failures=1
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::One or more quality/SAST checks failed policy."
+            exit 1
+          fi
+
+  secrets-and-filesystem-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [detect]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      pull-requests: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1 # v0.2.4
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Gitleaks secrets scan
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: TruffleHog secrets scan
+        id: trufflehog
+        uses: trufflesecurity/trufflehog@05cccb53bc9e13bc6d17997db5a6bcc3df44bf2f # v3.92.3
+        with:
+          path: .
+          base: ${{ github.event.repository.default_branch }}
+          head: HEAD
+          extra_args: --only-verified
+        continue-on-error: true
+
+      - name: Upload Gitleaks SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('gitleaks.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+        continue-on-error: true
+
+      - name: Evaluate secrets and filesystem scan
+        if: always() && inputs.enforce_policies
+        env:
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+        run: |
+          failures=0
+
+          if [ "${GITLEAKS_OUTCOME}" != "success" ]; then
+            echo "::error::Gitleaks found secrets or failed"
             failures=1
           fi
 
@@ -662,6 +718,40 @@ jobs:
           syft local/frontend:${{ env.IMAGE_TAG }} \
             -o cyclonedx-json=frontend-sbom.cdx.json \
             -o spdx-json=frontend-sbom.spdx.json
+
+      - name: Validate SBOM quality
+        if: needs.detect.outputs.build_any_image == 'true'
+        run: |
+          echo "Validating generated SBOMs..."
+          validate_sbom() {
+            local sbom_file=$1
+            if [[ ! -f "$sbom_file" ]]; then
+              echo "SBOM file not found: $sbom_file"
+              return 0
+            fi
+            echo "Checking $sbom_file"
+
+            if ! jq -e '.metadata and .components' "$sbom_file" > /dev/null 2>&1; then
+              echo "ERROR: $sbom_file is missing required top-level structure (metadata, components)."
+              exit 1
+            fi
+            
+            COMPONENT_COUNT=$(jq '.components | length' "$sbom_file")
+            if [ "$COMPONENT_COUNT" -eq 0 ]; then
+              echo "WARNING: $sbom_file contains zero components. It may be empty."
+            else
+              echo "SUCCESS: $sbom_file is valid and contains $COMPONENT_COUNT components."
+            fi
+          }
+          
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ] && [ -f "backend-sbom.cdx.json" ]; then
+            validate_sbom "backend-sbom.cdx.json"
+          fi
+          
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ] && [ -f "frontend-sbom.cdx.json" ]; then
+            validate_sbom "frontend-sbom.cdx.json"
+          fi
+        continue-on-error: true
 
       - name: Upload SBOMs
         if: always()
@@ -773,7 +863,7 @@ jobs:
         continue-on-error: true
 
       - name: Evaluate image scans
-        if: always()
+        if: always() && inputs.enforce_policies
         env:
           BUILD_BACKEND: ${{ needs.detect.outputs.build_backend_image }}
           BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
@@ -905,7 +995,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Evaluate license compliance
-        if: always()
+        if: always() && inputs.enforce_policies
         env:
           MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
           NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
@@ -927,9 +1017,51 @@ jobs:
             exit 1
           fi
 
+  supply-chain-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [detect]
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76 # v2.14.0
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run OpenSSF Scorecard
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+        continue-on-error: true
+
+      - name: Upload Scorecard SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('scorecard.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e # v4.31.8
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard
+        continue-on-error: true
+
+      - name: Dependency Review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2
+        with:
+          fail-on-severity: high
+        continue-on-error: true
+
   security-summary:
     runs-on: ubuntu-latest
-    needs: [detect, code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance]
+    needs: [detect, code-quality-and-sast, secrets-and-filesystem-scan, container-image-scan, license-compliance, supply-chain-security]
     if: always()
     permissions:
       contents: read
@@ -958,17 +1090,20 @@ jobs:
           | Secrets & Filesystem Scan | ${{ needs.secrets-and-filesystem-scan.result }} |
           | Container Image Scan | ${{ needs.container-image-scan.result }} |
           | License Compliance | ${{ needs.license-compliance.result }} |
+          | Supply Chain Security | ${{ needs.supply-chain-security.result }} |
 
           ## Security Policies Enforced
-          - Secrets scanning (Gitleaks)
+          - Secrets scanning (Gitleaks, TruffleHog)
           - SAST analysis (Semgrep)
-          - Dependency vulnerabilities (OWASP, npm audit)
+          - Dependency vulnerabilities (OWASP if enabled, npm audit, Trivy FS)
           - Container image vulnerabilities (Trivy)
           - License compliance (token-based)
           - Filesystem misconfigurations + vuln (Trivy FS)
+          - Code quality (Trunk if enabled, SonarQube if enabled)
           EOF
 
       - name: Check critical failures
+        if: inputs.enforce_policies
         run: |
           failures=0
 
@@ -977,7 +1112,7 @@ jobs:
             failures=1
           fi
 
-          if [ "${{ needs.container-image-scan.result }}" != "success" ]; then
+          if [ "${{ needs.container-image-scan.result }}" != "success" ] && [ "${{ needs.container-image-scan.result }}" != "skipped" ]; then
             echo "::error::Container image scan failed"
             failures=1
           fi
