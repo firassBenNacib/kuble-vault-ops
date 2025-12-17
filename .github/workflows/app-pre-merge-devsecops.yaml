@@ -30,6 +30,7 @@ on:
         default: true
 
 env:
+  DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
   TRIVY_VERSION: '0.68.2'
   SEMGREP_VERSION: '1.145.0'
   SYFT_VERSION: 'v1.38.2'
@@ -184,15 +185,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Check jq availability for Trunk
-        if: hashFiles('.trunk/trunk.yaml') != ''
-        run: |
-          if ! command -v jq &> /dev/null; then
-            echo "::warning::jq not found, installing for Trunk compatibility"
-            sudo apt-get update && sudo apt-get install -y jq
-          fi
-          jq --version
-
       - name: Trunk Code Quality
         if: hashFiles('.trunk/trunk.yaml') != ''
         uses: trunk-io/trunk-action@75699af9e26881e564e9d832ef7dc3af25ec031b # v1.2.4
@@ -330,7 +322,7 @@ jobs:
           fi
 
       - name: Check npm artifacts exist
-        if: always()
+        if: needs.detect.outputs.has_frontend == 'true'
         id: npm_artifacts
         run: |
           set -euo pipefail
@@ -613,7 +605,7 @@ jobs:
         uses: trufflesecurity/trufflehog@05cccb53bc9e13bc6d17997db5a6bcc3df44bf2f # v3.92.3
         with:
           path: .
-          base: ${{ github.event.repository.default_branch || 'main' }}
+          base: ${{ env.DEFAULT_BRANCH }}
           head: HEAD
           extra_args: --only-verified
         continue-on-error: true
@@ -966,26 +958,40 @@ jobs:
           cache-dependency-path: |
             **/package-lock.json
 
-      - name: Maven license check (string token scan)
+      - name: Maven license check
         if: needs.detect.outputs.has_backend == 'true'
         id: maven_license
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
           set +e
           exit_code=0
-
-          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.4.0:aggregate-third-party-report
-
           banned_found=false
-          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
+
+          mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
+
+          mvn -B -ntp license:add-third-party -Dlicense.thirdPartyFilename=THIRD-PARTY.txt
+
+          if [ -f "target/THIRD-PARTY.txt" ]; then
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
-              if grep -q "$token" "target/generated-sources/license/THIRD-PARTY.txt"; then
+              if grep -iq "$token" "target/THIRD-PARTY.txt"; then
                 echo "::error::Found banned license token in Maven report: $token"
                 banned_found=true
                 exit_code=1
               fi
             done
+          elif [ -f "target/dependency-tree.txt" ]; then
+            echo "::warning::THIRD-PARTY.txt not found, checking dependency tree"
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+            for token in "${TOKENS[@]}"; do
+              if grep -iq "$token" "target/dependency-tree.txt"; then
+                echo "::error::Found banned license token in dependency tree: $token"
+                banned_found=true
+                exit_code=1
+              fi
+            done
+          else
+            echo "::warning::Could not generate license information files"
           fi
 
           set -e
@@ -1032,7 +1038,8 @@ jobs:
         with:
           name: license-reports-${{ github.run_number }}
           path: |
-            ${{ needs.detect.outputs.backend_dir }}/target/generated-sources/license/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-tree.txt
             ${{ needs.detect.outputs.frontend_dir }}/licenses.json
           retention-days: 90
           if-no-files-found: ignore
