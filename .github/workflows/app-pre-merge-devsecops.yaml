@@ -979,44 +979,25 @@ jobs:
 
           mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
 
-          mvn -B -ntp license:download-licenses
+          mvn -B -ntp license:download-licenses -Dlicense.licensesOutputDirectory=target/licenses
 
-          LIC_FILE=""
-          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
-            LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
-          elif [ -f "target/THIRD-PARTY.txt" ]; then
-            LIC_FILE="target/THIRD-PARTY.txt"
-          elif [ -d "target/licenses" ]; then
+          if [ -d "target/licenses" ]; then
+            echo "Checking downloaded license XML files in target/licenses/"
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for xml_file in target/licenses/*.xml; do
               if [ -f "$xml_file" ]; then
-                LIC_FILE="$xml_file"
-                break
-              fi
-            done
-          fi
-          
-          if [ -n "$LIC_FILE" ] && [ -f "$LIC_FILE" ]; then
-            echo "Checking license file: $LIC_FILE"
-            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
-            for token in "${TOKENS[@]}"; do
-              if grep -iq "$token" "$LIC_FILE"; then
-                echo "::error::Found banned license token in Maven report: $token"
-                banned_found=true
-                exit_code=1
-              fi
-            done
-          elif [ -f "target/dependency-tree.txt" ]; then
-            echo "::warning::No license file found, checking dependency tree for banned terms"
-            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
-            for token in "${TOKENS[@]}"; do
-              if grep -iq "$token" "target/dependency-tree.txt"; then
-                echo "::error::Found banned license token in dependency tree: $token"
-                banned_found=true
-                exit_code=1
+                echo "Scanning: $(basename "$xml_file")"
+                for token in "${TOKENS[@]}"; do
+                  if grep -iq "$token" "$xml_file"; then
+                    echo "::error::Found banned license token '$token' in: $(basename "$xml_file")"
+                    banned_found=true
+                    exit_code=1
+                  fi
+                done
               fi
             done
           else
-            echo "::warning::Could not generate license information files"
+            echo "::warning::License directory 'target/licenses' was not created."
           fi
 
           set -e
@@ -1063,7 +1044,7 @@ jobs:
         with:
           name: license-reports-${{ github.run_number }}
           path: |
-            ${{ needs.detect.outputs.backend_dir }}/target/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/licenses/
             ${{ needs.detect.outputs.backend_dir }}/target/dependency-tree.txt
             ${{ needs.detect.outputs.frontend_dir }}/licenses.json
           retention-days: 90
