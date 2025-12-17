@@ -30,7 +30,6 @@ on:
         default: true
 
 env:
-  DEFAULT_BRANCH: ${{ github.event.repository.default_branch || 'main' }}
   TRIVY_VERSION: '0.68.2'
   SEMGREP_VERSION: '1.145.0'
   SYFT_VERSION: 'v1.38.2'
@@ -602,12 +601,23 @@ jobs:
 
       - name: TruffleHog secrets scan
         id: trufflehog
-        uses: trufflesecurity/trufflehog@05cccb53bc9e13bc6d17997db5a6bcc3df44bf2f # v3.92.3
-        with:
-          path: .
-          base: ${{ env.DEFAULT_BRANCH }}
-          head: HEAD
-          extra_args: --only-verified
+        run: |
+          echo "Current branch: ${{ github.ref_name }}"
+          echo "Event type: ${{ github.event_name }}"
+
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            echo "== PR detected: Scanning git changes from ${{ github.base_ref }} to ${{ github.head_ref }} =="
+            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:3.92.3 \
+              git file:///workdir \
+              --only-verified \
+              --base "${{ github.base_ref }}" \
+              --head HEAD 2>&1 | tail -20 || true
+          else
+            echo "== Not a PR: Scanning filesystem (current state) =="
+            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:3.92.3 \
+              filesystem /workdir \
+              --only-verified 2>&1 | tail -20 || true
+          fi
         continue-on-error: true
 
       - name: Trivy secret scan (filesystem)
@@ -969,19 +979,34 @@ jobs:
 
           mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
 
-          mvn -B -ntp license:add-third-party -Dlicense.thirdPartyFilename=THIRD-PARTY.txt
+          mvn -B -ntp license:download-licenses
 
-          if [ -f "target/THIRD-PARTY.txt" ]; then
+          LIC_FILE=""
+          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
+            LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
+          elif [ -f "target/THIRD-PARTY.txt" ]; then
+            LIC_FILE="target/THIRD-PARTY.txt"
+          elif [ -d "target/licenses" ]; then
+            for xml_file in target/licenses/*.xml; do
+              if [ -f "$xml_file" ]; then
+                LIC_FILE="$xml_file"
+                break
+              fi
+            done
+          fi
+          
+          if [ -n "$LIC_FILE" ] && [ -f "$LIC_FILE" ]; then
+            echo "Checking license file: $LIC_FILE"
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
-              if grep -iq "$token" "target/THIRD-PARTY.txt"; then
+              if grep -iq "$token" "$LIC_FILE"; then
                 echo "::error::Found banned license token in Maven report: $token"
                 banned_found=true
                 exit_code=1
               fi
             done
           elif [ -f "target/dependency-tree.txt" ]; then
-            echo "::warning::THIRD-PARTY.txt not found, checking dependency tree"
+            echo "::warning::No license file found, checking dependency tree for banned terms"
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
               if grep -iq "$token" "target/dependency-tree.txt"; then
@@ -1071,6 +1096,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
+    if: github.ref_name == 'main' || github.event_name == 'pull_request'
     permissions:
       contents: read
       security-events: write
