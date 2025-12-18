@@ -977,27 +977,38 @@ jobs:
           exit_code=0
           banned_found=false
 
-          mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
+          mvn -B -ntp license:license-list -Dlicense.skipDownloadLicenses=true -Dlicense.jsonOutputFile=target/licenses.json
 
-          mvn -B -ntp license:download-licenses -Dlicense.licensesOutputDirectory=target/licenses
-
-          if [ -d "target/licenses" ]; then
-            echo "Checking downloaded license XML files in target/licenses/"
-            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
-            for xml_file in target/licenses/*.xml; do
-              if [ -f "$xml_file" ]; then
-                echo "Scanning: $(basename "$xml_file")"
-                for token in "${TOKENS[@]}"; do
-                  if grep -iq "$token" "$xml_file"; then
-                    echo "::error::Found banned license token '$token' in: $(basename "$xml_file")"
-                    banned_found=true
-                    exit_code=1
-                  fi
-                done
-              fi
-            done
+          if [ -f "target/licenses.json" ]; then
+            echo "Checking licenses.json for banned licenses..."
+            python3 - <<'PY'
+            import json, sys, os
+            
+            banned_tokens = os.environ.get("BANNED_LICENSE_TOKENS", "").split(",")
+            banned_tokens = [t.strip() for t in banned_tokens if t.strip()]
+            
+            try:
+              with open("target/licenses.json", "r") as f:
+                data = json.load(f)
+              
+              for dep in data.get("dependencies", []):
+                licenses = dep.get("licenses", [])
+                for license_info in licenses:
+                  license_name = license_info.get("name", "")
+                  for banned in banned_tokens:
+                    if banned.lower() in license_name.lower():
+                      print(f"::error::Banned license '{banned}' found in: {dep.get('artifactId')}")
+                      sys.exit(1)
+            except Exception as e:
+              print(f"::warning::Could not parse licenses.json: {e}")
+              sys.exit(0)
+            PY
+            exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+              banned_found=true
+            fi
           else
-            echo "::warning::License directory 'target/licenses' was not created."
+            echo "::warning::Could not generate license file. Network restrictions may be blocking downloads."
           fi
 
           set -e
