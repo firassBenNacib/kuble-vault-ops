@@ -163,7 +163,7 @@ jobs:
 
   code-quality-and-sast:
     runs-on: ubuntu-latest
-    timeout-minutes: 50
+    timeout-minutes: 10
     needs: [detect]
     permissions:
       contents: read
@@ -273,7 +273,7 @@ jobs:
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: npm ci --prefer-offline --no-audit
 
-      - name: npm audit (gate on parsed JSON)
+      - name: npm audit
         if: needs.detect.outputs.has_frontend == 'true'
         id: npm_audit
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
@@ -298,7 +298,7 @@ jobs:
           PY
         continue-on-error: true
 
-      - name: npm tests (skip if script missing)
+      - name: npm tests
         if: needs.detect.outputs.has_frontend == 'true'
         id: npm_tests
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
@@ -310,7 +310,7 @@ jobs:
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
-      - name: Frontend production build (Angular if present, else generic)
+      - name: Frontend production build
         if: needs.detect.outputs.has_frontend == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
@@ -573,7 +573,7 @@ jobs:
 
   secrets-and-filesystem-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     needs: [detect]
     permissions:
       contents: read
