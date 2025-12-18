@@ -1,0 +1,1948 @@
+name: App Release DevSecOps
+
+on:
+  workflow_call:
+    inputs:
+      enable_code_scanning:
+        description: 'Enable upload-sarif steps (requires paid private repo or public repo)'
+        required: false
+        type: boolean
+        default: false
+      enable_sbom_generation:
+        description: 'Enable SBOM generation for images'
+        required: false
+        type: boolean
+        default: true
+      enable_image_signing:
+        description: 'Enable Cosign image signing'
+        required: false
+        type: boolean
+        default: true
+      enable_multi_arch:
+        description: 'Enable multi-architecture builds'
+        required: false
+        type: boolean
+        default: true
+      enable_dockle:
+        description: 'Enable Dockle container image best practices scanning'
+        required: false
+        type: boolean
+        default: true
+      enable_dive:
+        description: 'Enable Dive image layer analysis'
+        required: false
+        type: boolean
+        default: false
+      enable_slsa_provenance:
+        description: 'Enable SLSA provenance generation'
+        required: false
+        type: boolean
+        default: true
+      enable_dependency_track:
+        description: 'Enable upload to Dependency-Track'
+        required: false
+        type: boolean
+        default: false
+      enforce_policies:
+        description: 'Fail workflow when policy thresholds are exceeded'
+        required: false
+        type: boolean
+        default: true
+      promote_to_latest:
+        description: 'Promote images to :latest tag (for main branch only)'
+        required: false
+        type: boolean
+        default: false
+      run_comprehensive_sast:
+        description: 'Run comprehensive SAST (Semgrep) in release workflow'
+        required: false
+        type: boolean
+        default: true
+      enable_snyk:
+        description: 'Enable Snyk vulnerability scanning'
+        required: false
+        type: boolean
+        default: true
+      enable_socket:
+        description: 'Enable Socket.dev supply chain protection'
+        required: false
+        type: boolean
+        default: true
+      enable_owasp_dependency_check:
+        description: 'Enable OWASP Dependency-Check (Java backend only)'
+        required: false
+        type: boolean
+        default: true
+      enable_secrets_scanning:
+        description: 'Enable comprehensive secrets scanning'
+        required: false
+        type: boolean
+        default: true
+      enable_license_compliance:
+        description: 'Enable license compliance checking'
+        required: false
+        type: boolean
+        default: true
+      enable_supply_chain_security:
+        description: 'Enable supply chain security checks'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  TRIVY_VERSION: '0.68.2'
+  SYFT_VERSION: 'v1.38.2'
+  GRYPE_VERSION: 'v0.77.2'
+  COSIGN_VERSION: '2.3.0'
+  DOCKLE_VERSION: '0.4.13'
+  DIVE_VERSION: '0.11.0'
+  SEMGREP_VERSION: '1.145.0'
+  SNYK_VERSION: 'latest'
+  LICENSE_CHECKER_VERSION: '25.0.1'
+  DEPENDENCY_CHECK_VERSION: '12.1.9'
+  DEPENDENCY_CHECK_DATA: ~/.dependency-check
+  IMAGE_TAG: ${{ github.sha }}
+  REGISTRY: docker.io
+  TRIVY_SEVERITY: 'CRITICAL,HIGH'
+  GRYPE_FAIL_SEVERITY: 'high'
+  DOCKLE_SEVERITY: 'FATAL'
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  COSIGN_EXPERIMENTAL: 'true'
+  DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
+  DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
+  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+  BANNED_LICENSE_TOKENS: 'GPL-3.0,AGPL-3.0,LGPL-3.0'
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has_backend: ${{ steps.detect.outputs.has_backend }}
+      has_frontend: ${{ steps.detect.outputs.has_frontend }}
+      backend_dir: ${{ steps.detect.outputs.backend_dir }}
+      frontend_dir: ${{ steps.detect.outputs.frontend_dir }}
+      build_backend_image: ${{ steps.detect.outputs.build_backend_image }}
+      build_frontend_image: ${{ steps.detect.outputs.build_frontend_image }}
+      build_any_image: ${{ steps.detect.outputs.build_any_image }}
+      backend_image_context: ${{ steps.detect.outputs.backend_image_context }}
+      backend_image_dockerfile: ${{ steps.detect.outputs.backend_image_dockerfile }}
+      frontend_image_context: ${{ steps.detect.outputs.frontend_image_context }}
+      frontend_image_dockerfile: ${{ steps.detect.outputs.frontend_image_dockerfile }}
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Detect project structure
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          has_backend=false
+          backend_dir="."
+          for d in "." "backend" "api" "server"; do
+            if [ -f "$d/pom.xml" ] || [ -d "$d/src/main/java" ]; then
+              has_backend=true
+              backend_dir="$d"
+              break
+            fi
+          done
+
+          has_frontend=false
+          frontend_dir="."
+          for d in "." "frontend" "client" "web" "ui"; do
+            if [ -f "$d/package-lock.json" ] || [ -f "$d/package.json" ] || [ -d "$d/src/app" ]; then
+              has_frontend=true
+              frontend_dir="$d"
+              break
+            fi
+          done
+
+          build_backend_image=false
+          backend_image_context=""
+          backend_image_dockerfile=""
+
+          if [ "$has_backend" = "true" ]; then
+            if [ -f "$backend_dir/Dockerfile" ]; then
+              build_backend_image=true
+              backend_image_context="$backend_dir"
+              backend_image_dockerfile="Dockerfile"
+            elif [ -f "Dockerfile.backend" ]; then
+              build_backend_image=true
+              backend_image_context="."
+              backend_image_dockerfile="Dockerfile.backend"
+            elif [ -f "Dockerfile" ] && [ "$has_frontend" = "false" ]; then
+              build_backend_image=true
+              backend_image_context="."
+              backend_image_dockerfile="Dockerfile"
+            fi
+          fi
+
+          build_frontend_image=false
+          frontend_image_context=""
+          frontend_image_dockerfile=""
+
+          if [ "$has_frontend" = "true" ]; then
+            if [ -f "$frontend_dir/Dockerfile" ]; then
+              build_frontend_image=true
+              frontend_image_context="$frontend_dir"
+              frontend_image_dockerfile="Dockerfile"
+            elif [ -f "Dockerfile.frontend" ]; then
+              build_frontend_image=true
+              frontend_image_context="."
+              frontend_image_dockerfile="Dockerfile.frontend"
+            elif [ -f "Dockerfile" ] && [ "$has_backend" = "false" ]; then
+              build_frontend_image=true
+              frontend_image_context="."
+              frontend_image_dockerfile="Dockerfile"
+            fi
+          fi
+
+          build_any_image=false
+          if [ "$build_backend_image" = "true" ] || [ "$build_frontend_image" = "true" ]; then
+            build_any_image=true
+          fi
+
+          {
+            echo "has_backend=$has_backend"
+            echo "backend_dir=$backend_dir"
+            echo "has_frontend=$has_frontend"
+            echo "frontend_dir=$frontend_dir"
+
+            echo "build_backend_image=$build_backend_image"
+            echo "backend_image_context=$backend_image_context"
+            echo "backend_image_dockerfile=$backend_image_dockerfile"
+
+            echo "build_frontend_image=$build_frontend_image"
+            echo "frontend_image_context=$frontend_image_context"
+            echo "frontend_image_dockerfile=$frontend_image_dockerfile"
+
+            echo "build_any_image=$build_any_image"
+          } >> "$GITHUB_OUTPUT"
+
+  pre-release-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: [detect]
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Semgrep for SAST
+        run: |
+          python3 -m pip install --no-cache-dir --upgrade pip
+          python3 -m pip install --no-cache-dir semgrep==${{ env.SEMGREP_VERSION }}
+          semgrep --version
+
+      - name: Run Semgrep SAST (comprehensive)
+        id: semgrep_release
+        env:
+          SEMGREP_APP_TOKEN: ${{ env.SEMGREP_APP_TOKEN }}
+        run: |
+          set -e
+          echo "Running comprehensive Semgrep SAST scan for production..."
+          
+          if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
+            echo "Using Semgrep App with configured policies..."
+            semgrep ci --sarif --output semgrep-release.sarif
+          else
+            echo "Using local security-audit rules..."
+            semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif
+          fi
+          
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if not os.path.exists("semgrep-release.sarif"):
+            print("sarif_exists=false")
+            print("finding_count=0")
+            raise SystemExit(0)
+          d=json.load(open("semgrep-release.sarif"))
+          results=[]
+          for run in d.get("runs",[]):
+            results += run.get("results",[]) or []
+          count=len(results)
+          print("sarif_exists=true")
+          print(f"finding_count={count}")
+          PY
+        continue-on-error: true
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Trivy filesystem vulnerability scan
+        id: trivy_prebuild
+        run: |
+          echo "Trivy FS Pre-Build Vulnerability Scan (table output)"
+          trivy fs \
+            --scanners vuln \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            .
+
+          echo "Trivy FS Pre-Build Vulnerability Scan (SARIF output)"
+          trivy fs \
+            --scanners vuln \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format sarif \
+            --output trivy-prebuild-vuln.sarif \
+            .
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-prebuild-vuln.sarif"):
+            d=json.load(open("trivy-prebuild-vuln.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"vuln_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"vuln_count=0")
+          PY
+        continue-on-error: true
+
+      - name: Trivy secret scan
+        if: inputs.enable_secrets_scanning
+        id: trivy_secrets
+        run: |
+          echo "Trivy Secret Scan"
+          trivy fs --scanners secret \
+            --format table \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+          trivy fs --scanners secret \
+            --format sarif \
+            --output trivy-secrets.sarif \
+            --exit-code 0 \
+            --no-progress \
+            .
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-secrets.sarif"):
+            d=json.load(open("trivy-secrets.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("secret_sarif_exists=true")
+            print(f"secret_count={count}")
+          else:
+            print("secret_sarif_exists=false")
+            print(f"secret_count=0")
+          PY
+        continue-on-error: true
+
+      - name: Gitleaks secrets scan
+        if: inputs.enable_secrets_scanning
+        id: gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: TruffleHog secrets scan
+        if: inputs.enable_secrets_scanning
+        id: trufflehog
+        run: |
+          echo "Running TruffleHog secrets scan..."
+          docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:latest \
+            filesystem /workdir \
+            --only-verified 2>&1 | tail -20 || true
+        continue-on-error: true
+
+      - name: Set up JDK (backend)
+        if: needs.detect.outputs.has_backend == 'true'
+        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js (frontend)
+        if: needs.detect.outputs.has_frontend == 'true'
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Cache OWASP Dependency-Check data
+        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
+        id: depcheck_cache
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: ${{ env.DEPENDENCY_CHECK_DATA }}
+          key: depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            depcheck-${{ runner.os }}-${{ env.DEPENDENCY_CHECK_VERSION }}-
+
+      - name: Maven dependency check
+        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
+        id: depcheck
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: |
+          mkdir -p "${DEPENDENCY_CHECK_DATA}"
+
+          AUTO_UPDATE=true
+          if [ "${{ steps.depcheck_cache.outputs.cache-hit }}" = "true" ] && [ -f "${DEPENDENCY_CHECK_DATA}/odc.mv.db" ]; then
+            CACHE_AGE_SECONDS=$(($(date +%s) - $(stat -c %Y "${DEPENDENCY_CHECK_DATA}/odc.mv.db")))
+            CACHE_AGE_HOURS=$((CACHE_AGE_SECONDS / 3600))
+            if [ $CACHE_AGE_HOURS -lt 24 ]; then
+              echo "Cache is recent (${CACHE_AGE_HOURS} hours old), skipping auto-update"
+              AUTO_UPDATE=false
+            fi
+          fi
+
+          EXTRA_NVD=""
+          if [ -n "${NVD_API_KEY}" ]; then
+            EXTRA_NVD="-DnvdApiKey=${NVD_API_KEY}"
+          fi
+
+          SUPPRESS_ARG=""
+          if [ -f "dependency-check-suppressions.xml" ]; then
+            SUPPRESS_ARG="-DsuppressionFiles=dependency-check-suppressions.xml"
+          fi
+
+          mvn -B -ntp org.owasp:dependency-check-maven:${DEPENDENCY_CHECK_VERSION}:check \
+            -DfailBuildOnCVSS=7 \
+            -DdataDirectory="${DEPENDENCY_CHECK_DATA}" \
+            -DautoUpdate="${AUTO_UPDATE}" \
+            -Dformats=HTML,JSON,SARIF \
+            ${SUPPRESS_ARG} \
+            ${EXTRA_NVD}
+        continue-on-error: true
+
+      - name: npm install
+        if: needs.detect.outputs.has_frontend == 'true'
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        run: npm ci --prefer-offline --no-audit
+
+      - name: npm audit
+        if: needs.detect.outputs.has_frontend == 'true'
+        id: npm_audit
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        run: |
+          set -euo pipefail
+          npm audit --audit-level=high --json > npm-audit.json || echo "npm audit completed with findings"
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          try:
+              data=json.load(open("npm-audit.json"))
+              vul=data.get("metadata",{}).get("vulnerabilities",{})
+              high=int(vul.get("high",0) or 0)
+              critical=int(vul.get("critical",0) or 0)
+              print(f"high={high}")
+              print(f"critical={critical}")
+              print(f"high_critical_total={high+critical}")
+          except Exception as e:
+              print(f"high=0")
+              print(f"critical=0")
+              print(f"high_critical_total=0")
+          PY
+        continue-on-error: true
+
+      - name: Socket.dev supply chain protection
+        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true'
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        run: |
+          echo "Running Socket.dev supply chain protection..."
+          npx @socketsecurity/cli@latest ci --github-token=${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
+      - name: Install Snyk CLI
+        if: inputs.enable_snyk && env.SNYK_TOKEN != ''
+        run: |
+          echo "Installing Snyk CLI..."
+          npm install -g snyk@${{ env.SNYK_VERSION }}
+          snyk --version
+
+      - name: Snyk backend test
+        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_backend == 'true'
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        id: snyk_backend
+        run: |
+          echo "Running Snyk backend security scan..."
+          snyk test --severity-threshold=high --sarif-file-output=snyk-backend.sarif
+        continue-on-error: true
+
+      - name: Snyk frontend test
+        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_frontend == 'true'
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        id: snyk_frontend
+        run: |
+          echo "Running Snyk frontend security scan..."
+          snyk test --severity-threshold=high --sarif-file-output=snyk-frontend.sarif
+        continue-on-error: true
+
+      - name: Upload Semgrep SARIF artifact
+        if: steps.semgrep_release.outputs.sarif_exists == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: semgrep-release-${{ github.run_number }}
+          path: semgrep-release.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload Trivy pre-build SARIF artifact
+        if: steps.trivy_prebuild.outputs.sarif_exists == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: trivy-prebuild-vuln-${{ github.run_number }}
+          path: trivy-prebuild-vuln.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload Trivy secrets SARIF artifact
+        if: steps.trivy_secrets.outputs.secret_sarif_exists == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: trivy-secrets-${{ github.run_number }}
+          path: trivy-secrets.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Check dependency-check reports exist
+        if: always()
+        id: depcheck_reports
+        run: |
+          set -euo pipefail
+          exists=false
+          if [ "${{ needs.detect.outputs.has_backend }}" = "true" ]; then
+            base="${{ needs.detect.outputs.backend_dir }}"
+            for f in \
+              "$base/target/dependency-check-report.html" \
+              "$base/target/dependency-check-report.json" \
+              "$base/target/dependency-check-report.sarif"
+            do
+              if [ -f "$f" ]; then exists=true; fi
+            done
+          fi
+          echo "exists=$exists" >> "$GITHUB_OUTPUT"
+
+      - name: Upload dependency-check reports
+        if: steps.depcheck_reports.outputs.exists == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: dependency-check-${{ github.run_number }}
+          path: |
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.html
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.json
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload Snyk SARIF artifacts
+        if: always() && inputs.enable_snyk
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: snyk-sarifs-${{ github.run_number }}
+          path: |
+            snyk-backend.sarif
+            snyk-frontend.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload Semgrep SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.semgrep_release.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: semgrep-release.sarif
+          category: semgrep-release
+        continue-on-error: true
+
+      - name: Upload Trivy pre-build SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.trivy_prebuild.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-prebuild-vuln.sarif
+          category: trivy-prebuild-release
+        continue-on-error: true
+
+      - name: Upload Trivy secrets SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.trivy_secrets.outputs.secret_sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-secrets.sarif
+          category: trivy-secrets-release
+        continue-on-error: true
+
+      - name: Upload Snyk SARIF to code scanning (backend)
+        if: inputs.enable_code_scanning && hashFiles('snyk-backend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: snyk-backend.sarif
+          category: snyk-backend-release
+        continue-on-error: true
+
+      - name: Upload Snyk SARIF to code scanning (frontend)
+        if: inputs.enable_code_scanning && hashFiles('snyk-frontend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: snyk-frontend.sarif
+          category: snyk-frontend-release
+        continue-on-error: true
+
+      - name: Upload OWASP SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.depcheck_reports.outputs.exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: ${{ needs.detect.outputs.backend_dir }}/target/dependency-check-report.sarif
+          category: owasp-dependency-check-release
+        continue-on-error: true
+
+      - name: Evaluate pre-release security
+        if: always() && inputs.enforce_policies
+        env:
+          HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
+          HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
+          TRIVY_PREBUILD_COUNT: ${{ steps.trivy_prebuild.outputs.vuln_count }}
+          TRIVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
+          GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
+          SEMGREP_FINDING_COUNT: ${{ steps.semgrep_release.outputs.finding_count }}
+          DEPCHECK_ENABLED: ${{ inputs.enable_owasp_dependency_check }}
+          DEPCHECK_OUTCOME: ${{ steps.depcheck.outcome }}
+          NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
+          SNYK_BACKEND_OUTCOME: ${{ steps.snyk_backend.outcome }}
+          SNYK_FRONTEND_OUTCOME: ${{ steps.snyk_frontend.outcome }}
+        run: |
+          failures=0
+
+          if [ "${TRIVY_PREBUILD_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Trivy pre-build scan found CRITICAL/HIGH vulnerabilities (count=${TRIVY_PREBUILD_COUNT})"
+            failures=1
+          fi
+
+          if [ "${{ inputs.enable_secrets_scanning }}" = "true" ]; then
+            if [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
+              echo "::error::Trivy found secrets in filesystem (count=${TRIVY_SECRET_COUNT})"
+              failures=1
+            fi
+
+            if [ "${GITLEAKS_OUTCOME}" != "success" ]; then
+              echo "::error::Gitleaks found secrets or failed"
+              failures=1
+            fi
+          fi
+
+          if [ "${SEMGREP_FINDING_COUNT:-0}" -gt 0 ]; then
+            echo "::error::Semgrep found ${SEMGREP_FINDING_COUNT} security findings"
+            failures=1
+          fi
+
+          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_ENABLED}" = "true" ]; then
+            if [ "${DEPCHECK_OUTCOME}" != "success" ]; then
+              echo "::error::Dependency check failed or found policy-breaking vulns (outcome=${DEPCHECK_OUTCOME})"
+              failures=1
+            fi
+          fi
+
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
+            echo "::error::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
+            failures=1
+          fi
+
+          if [ "${{ inputs.enable_snyk }}" = "true" ]; then
+            if [ "${HAS_BACKEND}" = "true" ] && [ "${SNYK_BACKEND_OUTCOME}" != "success" ] && [ "${SNYK_BACKEND_OUTCOME}" != "skipped" ]; then
+              echo "::error::Snyk backend scan found HIGH+ severity vulnerabilities"
+              failures=1
+            fi
+            
+            if [ "${HAS_FRONTEND}" = "true" ] && [ "${SNYK_FRONTEND_OUTCOME}" != "success" ] && [ "${SNYK_FRONTEND_OUTCOME}" != "skipped" ]; then
+              echo "::error::Snyk frontend scan found HIGH+ severity vulnerabilities"
+              failures=1
+            fi
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Pre-release security validation failed policy."
+            exit 1
+          fi
+
+  license-compliance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [detect]
+    if: inputs.enable_license_compliance
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
+
+      - name: Set up JDK (backend)
+        if: needs.detect.outputs.has_backend == 'true'
+        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Set up Node.js (frontend)
+        if: needs.detect.outputs.has_frontend == 'true'
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: |
+            **/package-lock.json
+
+      - name: Maven license check
+        if: needs.detect.outputs.has_backend == 'true'
+        id: maven_license
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: |
+          set -e
+          banned_found=false
+          
+          mvn -B -ntp license:add-third-party \
+            -Dlicense.excludedScopes=test,provided \
+            -Dlicense.outputDirectory=target/generated-sources/license \
+            -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
+            -Dskip=false 2>&1 | grep -v "Parameter 'skip' is unknown" || true
+
+          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
+            echo "Found license file"
+            LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+            for token in "${TOKENS[@]}"; do
+              if grep -iq "$token" "$LIC_FILE"; then
+                echo "::error::Found banned license token '$token' in: $LIC_FILE"
+                banned_found=true
+              fi
+            done
+          else
+            echo "::warning::No license file generated at target/generated-sources/license/THIRD-PARTY.txt"
+          fi
+          
+          echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
+
+      - name: npm license report
+        if: needs.detect.outputs.has_frontend == 'true'
+        id: npm_license
+        working-directory: ${{ needs.detect.outputs.frontend_dir }}
+        run: |
+          set -euo pipefail
+          npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
+          npm ci --prefer-offline --no-audit
+          license-checker --json --out licenses.json
+          
+          python3 - <<'PY'
+          import json, os
+          
+          banned=os.environ.get("BANNED_LICENSE_TOKENS","").split(",")
+          banned=[b.strip() for b in banned if b.strip()]
+          
+          data=json.load(open("licenses.json", encoding="utf-8"))
+          bad=[]
+          for pkg, info in data.items():
+            lic=info.get("licenses","")
+            s=";".join(lic) if isinstance(lic,list) else str(lic)
+            if any(tok in s for tok in banned):
+              bad.append((pkg,s))
+          
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+            f.write(f"banned_count={len(bad)}\n")
+          
+          if bad:
+            print("License compliance violations found:")
+            for pkg,s in bad[:50]:
+              print(f"- {pkg}: {s}")
+          PY
+
+      - name: Upload license reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: license-reports-${{ github.run_number }}
+          path: |
+            ${{ needs.detect.outputs.backend_dir }}/target/generated-sources/license/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/dependency-tree.txt
+            ${{ needs.detect.outputs.frontend_dir }}/licenses.json
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Evaluate license compliance
+        if: always() && inputs.enforce_policies
+        env:
+          MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
+          NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
+        run: |
+          failures=0
+          
+          if [ "${MAVEN_BANNED}" = "true" ]; then
+            echo "::error::Maven dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS})"
+            failures=1
+          fi
+          
+          if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
+            echo "::error::NPM dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS}); count=${NPM_BANNED_COUNT}"
+            failures=1
+          fi
+          
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::License compliance check failed."
+            exit 1
+          fi
+
+  supply-chain-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [detect]
+    if: inputs.enable_supply_chain_security && (github.ref_name == 'main' || github.event_name == 'pull_request')
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Run OpenSSF Scorecard
+        if: github.ref_name == 'main'
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+        continue-on-error: true
+
+      - name: Dependency Review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261
+        with:
+          fail-on-severity: high
+        continue-on-error: true
+
+      - name: Upload Scorecard SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('scorecard.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: scorecard.sarif
+          category: scorecard-release
+        continue-on-error: true
+
+  build-and-push-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [detect, pre-release-security, license-compliance, supply-chain-security]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    outputs:
+      backend_image_name: ${{ steps.set-images.outputs.backend_image_name }}
+      frontend_image_name: ${{ steps.set-images.outputs.frontend_image_name }}
+      backend_digest: ${{ steps.backend-build.outputs.digest }}
+      frontend_digest: ${{ steps.frontend-build.outputs.digest }}
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
+
+      - name: Set image names
+        id: set-images
+        run: |
+          {
+            echo "backend_image_name=${{ env.DOCKERHUB_USERNAME }}/backend:${{ env.IMAGE_TAG }}"
+            echo "frontend_image_name=${{ env.DOCKERHUB_USERNAME }}/frontend:${{ env.IMAGE_TAG }}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        if: inputs.enable_multi_arch
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Build and push backend image
+        id: backend-build
+        if: needs.detect.outputs.build_backend_image == 'true'
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: ${{ needs.detect.outputs.backend_image_context }}
+          file: ${{ needs.detect.outputs.backend_image_context }}/${{ needs.detect.outputs.backend_image_dockerfile }}
+          push: true
+          platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          tags: |
+            ${{ steps.set-images.outputs.backend_image_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: ${{ inputs.enable_slsa_provenance && inputs.enable_multi_arch && 'true' || 'false' }}
+          sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
+          labels: |
+            org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+            org.opencontainers.image.created=${{ fromJSON('{}').job_started_at || 'unknown' }}
+            org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
+
+      - name: Build and push frontend image
+        id: frontend-build
+        if: needs.detect.outputs.build_frontend_image == 'true'
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: ${{ needs.detect.outputs.frontend_image_context }}
+          file: ${{ needs.detect.outputs.frontend_image_context }}/${{ needs.detect.outputs.frontend_image_dockerfile }}
+          push: true
+          platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
+          tags: |
+            ${{ steps.set-images.outputs.frontend_image_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: ${{ inputs.enable_slsa_provenance && inputs.enable_multi_arch && 'true' || 'false' }}
+          sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
+          labels: |
+            org.opencontainers.image.version=${{ env.IMAGE_TAG }}
+            org.opencontainers.image.created=${{ fromJSON('{}').job_started_at || 'unknown' }}
+            org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
+
+      - name: Log image digests
+        if: always()
+        run: |
+          echo "Backend image digest: ${{ steps.backend-build.outputs.digest || 'N/A' }}"
+          echo "Frontend image digest: ${{ steps.frontend-build.outputs.digest || 'N/A' }}"
+
+  image-security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: [detect, build-and-push-images]
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+      packages: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
+
+      - name: Setup Trivy
+        uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1
+        with:
+          version: v${{ env.TRIVY_VERSION }}
+          cache: true
+
+      - name: Install Syft
+        if: inputs.enable_sbom_generation
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/syft/${{ env.SYFT_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
+          syft version
+
+      - name: Install Grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/${{ env.GRYPE_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.GRYPE_VERSION }}
+          grype version
+
+      - name: Install Cosign
+        if: inputs.enable_image_signing
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
+
+      - name: Install Dockle
+        if: inputs.enable_dockle
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/goodwithtech/dockle/master/install.sh | sh -s -- -b /usr/local/bin ${{ env.DOCKLE_VERSION }}
+          dockle --version
+
+      - name: Install Dive
+        if: inputs.enable_dive
+        run: |
+          wget https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          sudo apt-get install -f ./dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          rm dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          dive --version
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Generate backend SBOM with Syft
+        if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          syft ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            -o cyclonedx-json \
+            --file backend-release-sbom.cdx.json
+          
+          syft ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            -o spdx-json \
+            --file backend-release-sbom.spdx.json
+
+      - name: Generate frontend SBOM with Syft
+        if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          syft ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            -o cyclonedx-json \
+            --file frontend-release-sbom.cdx.json
+          
+          syft ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            -o spdx-json \
+            --file frontend-release-sbom.spdx.json
+
+      - name: Validate SBOM quality
+        if: inputs.enable_sbom_generation
+        run: |
+          echo "Validating release SBOMs..."
+          validate_sbom() {
+            local sbom_file=$1
+            if [[ ! -f "$sbom_file" ]]; then
+              echo "SBOM file not found: $sbom_file"
+              return 0
+            fi
+            echo "Checking $sbom_file"
+
+            if ! jq -e '.metadata and .components' "$sbom_file" > /dev/null 2>&1; then
+              echo "ERROR: $sbom_file is missing required top-level structure (metadata, components)."
+              exit 1
+            fi
+            
+            COMPONENT_COUNT=$(jq '.components | length' "$sbom_file")
+            if [ "$COMPONENT_COUNT" -eq 0 ]; then
+              echo "WARNING: $sbom_file contains zero components. It may be empty."
+            else
+              echo "SUCCESS: $sbom_file is valid and contains $COMPONENT_COUNT components."
+            fi
+          }
+          
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ] && [ -f "backend-release-sbom.cdx.json" ]; then
+            validate_sbom "backend-release-sbom.cdx.json"
+          fi
+          
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ] && [ -f "frontend-release-sbom.cdx.json" ]; then
+            validate_sbom "frontend-release-sbom.cdx.json"
+          fi
+        continue-on-error: true
+
+      - name: Upload SBOM to Dependency-Track
+        if: inputs.enable_dependency_track && env.DEPENDENCY_TRACK_URL != '' && env.DEPENDENCY_TRACK_API_KEY != ''
+        run: |
+          echo "Uploading SBOMs to Dependency-Track..."
+          
+          upload_to_dependency_track() {
+            local sbom_file=$1
+            local project_name=$2
+            
+            if [ ! -f "$sbom_file" ]; then
+              echo "SBOM file not found: $sbom_file"
+              return 0
+            fi
+            
+            echo "Uploading $sbom_file for project: $project_name"
+            
+            PROJECT_RESPONSE=$(curl -s -X GET \
+              -H "X-Api-Key: $DEPENDENCY_TRACK_API_KEY" \
+              "$DEPENDENCY_TRACK_URL/api/v1/project/lookup?name=$project_name&version=$IMAGE_TAG" || echo "{}")
+            
+            PROJECT_UUID=$(echo "$PROJECT_RESPONSE" | jq -r '.uuid // empty')
+            
+            if [ -z "$PROJECT_UUID" ]; then
+              echo "Creating new project: $project_name"
+              PROJECT_CREATE=$(curl -s -X PUT \
+                -H "Content-Type: application/json" \
+                -H "X-Api-Key: $DEPENDENCY_TRACK_API_KEY" \
+                -d "{
+                  \"name\": \"$project_name\",
+                  \"version\": \"$IMAGE_TAG\",
+                  \"description\": \"Automatically created from CI/CD pipeline\",
+                  \"tags\": [\"ci-cd\", \"automated\"]
+                }" \
+                "$DEPENDENCY_TRACK_URL/api/v1/project")
+              
+              PROJECT_UUID=$(echo "$PROJECT_CREATE" | jq -r '.uuid // empty')
+            fi
+            
+            if [ -n "$PROJECT_UUID" ]; then
+              echo "Uploading BOM to project UUID: $PROJECT_UUID"
+              curl -s -X POST \
+                -H "Content-Type: multipart/form-data" \
+                -H "X-Api-Key: $DEPENDENCY_TRACK_API_KEY" \
+                -F "project=$PROJECT_UUID" \
+                -F "bom=@$sbom_file" \
+                "$DEPENDENCY_TRACK_URL/api/v1/bom" \
+                && echo "Upload successful for $project_name" \
+                || echo "Upload failed for $project_name"
+            else
+              echo "Failed to get or create project for $project_name"
+            fi
+          }
+          
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ] && [ -f "backend-release-sbom.cdx.json" ]; then
+            upload_to_dependency_track "backend-release-sbom.cdx.json" "${{ github.repository }}-backend"
+          fi
+          
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ] && [ -f "frontend-release-sbom.cdx.json" ]; then
+            upload_to_dependency_track "frontend-release-sbom.cdx.json" "${{ github.repository }}-frontend"
+          fi
+        continue-on-error: true
+
+      - name: Snyk container test (backend)
+        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_backend_image == 'true'
+        id: snyk_container_backend
+        run: |
+          echo "Running Snyk container scan for backend image..."
+          snyk container test ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            --severity-threshold=high \
+            --sarif-file-output=snyk-container-backend.sarif
+        continue-on-error: true
+
+      - name: Snyk container test (frontend)
+        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_frontend_image == 'true'
+        id: snyk_container_frontend
+        run: |
+          echo "Running Snyk container scan for frontend image..."
+          snyk container test ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            --severity-threshold=high \
+            --sarif-file-output=snyk-container-frontend.sarif
+        continue-on-error: true
+
+      - name: Trivy scan backend image
+        if: needs.detect.outputs.build_backend_image == 'true'
+        id: trivy_backend_image
+        run: |
+          set -euo pipefail
+
+          echo "Trivy image scan (backend) - table output"
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
+
+          echo "Trivy image scan (backend) - SARIF output"
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format sarif \
+            --output trivy-backend-release.sarif \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-backend-release.sarif"):
+            d=json.load(open("trivy-backend-release.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"vuln_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"vuln_count=0")
+          PY
+        continue-on-error: true
+
+      - name: Trivy scan frontend image
+        if: needs.detect.outputs.build_frontend_image == 'true'
+        id: trivy_frontend_image
+        run: |
+          set -euo pipefail
+
+          echo "Trivy image scan (frontend) - table output"
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format table \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+
+          echo "Trivy image scan (frontend) - SARIF output"
+          trivy image \
+            --severity "${TRIVY_SEVERITY}" \
+            --exit-code 0 \
+            --no-progress \
+            --format sarif \
+            --output trivy-frontend-release.sarif \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-frontend-release.sarif"):
+            d=json.load(open("trivy-frontend-release.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"vuln_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"vuln_count=0")
+          PY
+        continue-on-error: true
+
+      - name: Grype scan backend image
+        if: needs.detect.outputs.build_backend_image == 'true'
+        id: grype_backend_image
+        run: |
+          echo "Grype image scan (backend)"
+          grype ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            --fail-on "${GRYPE_FAIL_SEVERITY}" \
+            -o sarif \
+            --file grype-backend-release.sarif
+        continue-on-error: true
+
+      - name: Grype scan frontend image
+        if: needs.detect.outputs.build_frontend_image == 'true'
+        id: grype_frontend_image
+        run: |
+          echo "Grype image scan (frontend)"
+          grype ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            --fail-on "${GRYPE_FAIL_SEVERITY}" \
+            -o sarif \
+            --file grype-frontend-release.sarif
+        continue-on-error: true
+
+      - name: Dockle scan backend image
+        if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
+        id: dockle_backend_image
+        run: |
+          echo "Dockle image best practices scan (backend)"
+          dockle \
+            --exit-code 0 \
+            --exit-level "${DOCKLE_SEVERITY}" \
+            --format json \
+            --output dockle-backend-report.json \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }} 2>&1 | grep -v "level=INFO" || true
+          
+          echo "Dockle summary:"
+          if [ -f "dockle-backend-report.json" ]; then
+            jq -r '.[] | "\(.code): \(.title) (Level: \(.level))"' dockle-backend-report.json || echo "No issues found or invalid JSON"
+          fi
+        continue-on-error: true
+
+      - name: Dockle scan frontend image
+        if: inputs.enable_dockle && needs.detect.outputs.build_frontend_image == 'true'
+        id: dockle_frontend_image
+        run: |
+          echo "Dockle image best practices scan (frontend)"
+          dockle \
+            --exit-code 0 \
+            --exit-level "${DOCKLE_SEVERITY}" \
+            --format json \
+            --output dockle-frontend-report.json \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }} 2>&1 | grep -v "level=INFO" || true
+          
+          echo "Dockle summary:"
+          if [ -f "dockle-frontend-report.json" ]; then
+            jq -r '.[] | "\(.code): \(.title) (Level: \(.level))"' dockle-frontend-report.json || echo "No issues found or invalid JSON"
+          fi
+        continue-on-error: true
+
+      - name: Dive analysis backend image
+        if: inputs.enable_dive && needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          echo "Dive image layer analysis (backend)"
+          CI=true dive ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            --ci \
+            --lowestEfficiency=0.8
+        continue-on-error: true
+
+      - name: Dive analysis frontend image
+        if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          echo "Dive image layer analysis (frontend)"
+          CI=true dive ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            --ci \
+            --lowestEfficiency=0.8
+        continue-on-error: true
+
+      - name: Sign backend image with Cosign
+        if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          cosign sign --yes \
+            --annotations build-timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --annotations git-sha=${{ env.IMAGE_TAG }} \
+            --annotations workflow-run=${{ github.run_id }} \
+            --annotations github-ref=${{ github.ref }} \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
+
+      - name: Sign frontend image with Cosign
+        if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          cosign sign --yes \
+            --annotations build-timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+            --annotations git-sha=${{ env.IMAGE_TAG }} \
+            --annotations workflow-run=${{ github.run_id }} \
+            --annotations github-ref=${{ github.ref }} \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+
+      - name: Verify backend image signature
+        if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          cosign verify \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+            --certificate-identity-regexp='.*' \
+            --certificate-oidc-issuer-regexp='.*'
+
+      - name: Verify frontend image signature
+        if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          cosign verify \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+            --certificate-identity-regexp='.*' \
+            --certificate-oidc-issuer-regexp='.*'
+
+      - name: Upload release SBOMs
+        if: always() && inputs.enable_sbom_generation
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: release-sboms-${{ github.run_number }}
+          path: |
+            *-release-sbom.cdx.json
+            *-release-sbom.spdx.json
+          retention-days: 365
+          if-no-files-found: ignore
+
+      - name: Upload Trivy image SARIFs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: trivy-image-sarifs-${{ github.run_number }}
+          path: trivy-*-release.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload Grype SARIFs
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: grype-sarifs-${{ github.run_number }}
+          path: grype-*-release.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload Snyk container SARIFs
+        if: always() && inputs.enable_snyk
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: snyk-container-sarifs-${{ github.run_number }}
+          path: snyk-container-*.sarif
+          retention-days: 90
+          if-no-files-found: ignore
+
+      - name: Upload Dockle reports
+        if: always() && inputs.enable_dockle
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: dockle-reports-${{ github.run_number }}
+          path: |
+            dockle-*-report.json
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload Trivy backend SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.trivy_backend_image.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-backend-release.sarif
+          category: trivy-backend-release
+        continue-on-error: true
+
+      - name: Upload Trivy frontend SARIF to code scanning
+        if: inputs.enable_code_scanning && steps.trivy_frontend_image.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-frontend-release.sarif
+          category: trivy-frontend-release
+        continue-on-error: true
+
+      - name: Upload Grype backend SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('grype-backend-release.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: grype-backend-release.sarif
+          category: grype-backend-release
+        continue-on-error: true
+
+      - name: Upload Grype frontend SARIF to code scanning
+        if: inputs.enable_code_scanning && hashFiles('grype-frontend-release.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: grype-frontend-release.sarif
+          category: grype-frontend-release
+        continue-on-error: true
+
+      - name: Upload Snyk container SARIF to code scanning (backend)
+        if: inputs.enable_code_scanning && hashFiles('snyk-container-backend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: snyk-container-backend.sarif
+          category: snyk-container-backend
+        continue-on-error: true
+
+      - name: Upload Snyk container SARIF to code scanning (frontend)
+        if: inputs.enable_code_scanning && hashFiles('snyk-container-frontend.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: snyk-container-frontend.sarif
+          category: snyk-container-frontend
+        continue-on-error: true
+
+      - name: Evaluate image security scans
+        if: always() && inputs.enforce_policies
+        env:
+          BUILD_BACKEND: ${{ needs.detect.outputs.build_backend_image }}
+          BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
+          TRIVY_BACKEND_COUNT: ${{ steps.trivy_backend_image.outputs.vuln_count }}
+          TRIVY_FRONTEND_COUNT: ${{ steps.trivy_frontend_image.outputs.vuln_count }}
+          GRYPE_BACKEND_OUTCOME: ${{ steps.grype_backend_image.outcome }}
+          GRYPE_FRONTEND_OUTCOME: ${{ steps.grype_frontend_image.outcome }}
+          DOCKLE_BACKEND_OUTCOME: ${{ steps.dockle_backend_image.outcome }}
+          DOCKLE_FRONTEND_OUTCOME: ${{ steps.dockle_frontend_image.outcome }}
+          SNYK_CONTAINER_BACKEND_OUTCOME: ${{ steps.snyk_container_backend.outcome }}
+          SNYK_CONTAINER_FRONTEND_OUTCOME: ${{ steps.snyk_container_frontend.outcome }}
+        run: |
+          failures=0
+
+          if [ "${BUILD_BACKEND}" = "true" ] && [ "${TRIVY_BACKEND_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Backend image scan found CRITICAL/HIGH vulnerabilities (count=${TRIVY_BACKEND_COUNT})"
+            failures=1
+          fi
+
+          if [ "${BUILD_FRONTEND}" = "true" ] && [ "${TRIVY_FRONTEND_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Frontend image scan found CRITICAL/HIGH vulnerabilities (count=${TRIVY_FRONTEND_COUNT})"
+            failures=1
+          fi
+
+          if [ "${BUILD_BACKEND}" = "true" ] && [ "${GRYPE_BACKEND_OUTCOME}" != "success" ]; then
+            echo "::error::Grype backend scan failed or found ${GRYPE_FAIL_SEVERITY}+ vulnerabilities"
+            failures=1
+          fi
+
+          if [ "${BUILD_FRONTEND}" = "true" ] && [ "${GRYPE_FRONTEND_OUTCOME}" != "success" ]; then
+            echo "::error::Grype frontend scan failed or found ${GRYPE_FAIL_SEVERITY}+ vulnerabilities"
+            failures=1
+          fi
+
+          if [ "${BUILD_BACKEND}" = "true" ] && [ "${DOCKLE_BACKEND_OUTCOME}" != "success" ] && [ "${DOCKLE_BACKEND_OUTCOME}" != "skipped" ]; then
+            echo "::error::Dockle backend scan found FATAL issues"
+            failures=1
+          fi
+
+          if [ "${BUILD_FRONTEND}" = "true" ] && [ "${DOCKLE_FRONTEND_OUTCOME}" != "success" ] && [ "${DOCKLE_FRONTEND_OUTCOME}" != "skipped" ]; then
+            echo "::error::Dockle frontend scan found FATAL issues"
+            failures=1
+          fi
+
+          if [ "${{ inputs.enable_snyk }}" = "true" ]; then
+            if [ "${BUILD_BACKEND}" = "true" ] && [ "${SNYK_CONTAINER_BACKEND_OUTCOME}" != "success" ] && [ "${SNYK_CONTAINER_BACKEND_OUTCOME}" != "skipped" ]; then
+              echo "::error::Snyk container backend scan found HIGH+ severity vulnerabilities"
+              failures=1
+            fi
+            
+            if [ "${BUILD_FRONTEND}" = "true" ] && [ "${SNYK_CONTAINER_FRONTEND_OUTCOME}" != "success" ] && [ "${SNYK_CONTAINER_FRONTEND_OUTCOME}" != "skipped" ]; then
+              echo "::error::Snyk container frontend scan found HIGH+ severity vulnerabilities"
+              failures=1
+            fi
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Image security scanning failed policy."
+            exit 1
+          fi
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [detect, build-and-push-images, image-security-scan]
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Backend smoke test
+        if: needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          set -euo pipefail
+          
+          echo "Starting backend container for smoke test..."
+          docker run -d --rm --name backend-smoke-test \
+            -p 8088:8088 \
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
+          
+          echo "Waiting for backend to start (max 60 seconds)..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8088/actuator/health 2>/dev/null; then
+              echo "Backend health check passed"
+              HEALTH_OUTPUT=$(curl -s http://localhost:8088/actuator/health)
+              echo "Health details: $HEALTH_OUTPUT"
+              
+              curl -f http://localhost:8088/actuator/health/liveness 2>/dev/null && echo "Liveness check passed"
+              curl -f http://localhost:8088/actuator/health/readiness 2>/dev/null && echo "Readiness check passed"
+              
+              docker stop backend-smoke-test
+              exit 0
+            fi
+            sleep 2
+          done
+          
+          echo "Backend health check failed after 60 seconds"
+          echo "Container logs:"
+          docker logs backend-smoke-test
+          docker stop backend-smoke-test
+          exit 1
+
+      - name: Frontend smoke test
+        if: needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          set -euo pipefail
+          
+          echo "Starting frontend container for smoke test..."
+          docker run -d --rm --name frontend-smoke-test \
+            -p 8080:80 \
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+          
+          echo "Waiting for frontend to start (max 60 seconds)..."
+          for i in {1..30}; do
+            if curl -f http://localhost:8080 2>/dev/null; then
+              echo "Frontend is accessible"
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080)
+              echo "HTTP Status: $HTTP_CODE"
+              
+              curl -f http://localhost:8080/index.html 2>/dev/null && echo "index.html accessible"
+              curl -f http://localhost:8080/favicon.ico 2>/dev/null && echo "favicon.ico accessible"
+              
+              docker stop frontend-smoke-test
+              exit 0
+            fi
+            sleep 2
+          done
+          
+          echo "Frontend accessibility check failed after 60 seconds"
+          echo "Container logs:"
+          docker logs frontend-smoke-test
+          docker stop frontend-smoke-test
+          exit 1
+
+      - name: Clean up test containers
+        if: always()
+        run: |
+          docker stop backend-smoke-test frontend-smoke-test 2>/dev/null || true
+
+  promote-to-latest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: [detect, build-and-push-images, image-security-scan, smoke-test]
+    if: inputs.promote_to_latest == true
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Promote backend to latest
+        if: needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          echo "Promoting backend image to latest tag..."
+          docker pull ${{ needs.build-and-push-images.outputs.backend_image_name }}
+          docker tag ${{ needs.build-and-push-images.outputs.backend_image_name }} \
+                     ${{ env.DOCKERHUB_USERNAME }}/backend:latest
+          docker push ${{ env.DOCKERHUB_USERNAME }}/backend:latest
+          
+          docker pull ${{ env.DOCKERHUB_USERNAME }}/backend:latest
+          echo "Backend promoted to latest tag"
+
+      - name: Promote frontend to latest
+        if: needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          echo "Promoting frontend image to latest tag..."
+          docker pull ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+          docker tag ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
+                     ${{ env.DOCKERHUB_USERNAME }}/frontend:latest
+          docker push ${{ env.DOCKERHUB_USERNAME }}/frontend:latest
+          
+          docker pull ${{ env.DOCKERHUB_USERNAME }}/frontend:latest
+          echo "Frontend promoted to latest tag"
+
+      - name: Sign latest tags with Cosign
+        if: inputs.enable_image_signing
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
+            echo "Signing backend:latest..."
+            cosign sign --yes \
+              --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
+              --annotations original-sha=${{ env.IMAGE_TAG }} \
+              ${{ env.DOCKERHUB_USERNAME }}/backend:latest
+          fi
+          
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
+            echo "Signing frontend:latest..."
+            cosign sign --yes \
+              --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
+              --annotations original-sha=${{ env.IMAGE_TAG }} \
+              ${{ env.DOCKERHUB_USERNAME }}/frontend:latest
+          fi
+
+  release-summary:
+    runs-on: ubuntu-latest
+    needs: [detect, pre-release-security, license-compliance, supply-chain-security, build-and-push-images, image-security-scan, smoke-test, promote-to-latest]
+    if: always()
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Generate consolidated vulnerability report
+        if: always()
+        run: |
+          echo "# Consolidated Security Report" > consolidated-report.md
+          echo "Generated: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> consolidated-report.md
+          echo "Workflow Run: ${{ github.run_number }}" >> consolidated-report.md
+          echo "Image Tag: ${{ env.IMAGE_TAG }}" >> consolidated-report.md
+          echo "" >> consolidated-report.md
+          
+          echo "## Pre-release Security Scans" >> consolidated-report.md
+          
+          if [ -f "trivy-prebuild-vuln.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' trivy-prebuild-vuln.sarif 2>/dev/null || echo "0")
+            echo "- Trivy Filesystem Scan: $COUNT findings" >> consolidated-report.md
+          else
+            echo "- Trivy Filesystem Scan: No report found" >> consolidated-report.md
+          fi
+          
+          if [ -f "semgrep-release.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' semgrep-release.sarif 2>/dev/null || echo "0")
+            echo "- Semgrep SAST: $COUNT findings" >> consolidated-report.md
+          elif [ "${{ inputs.run_comprehensive_sast }}" = "true" ]; then
+            echo "- Semgrep SAST: Disabled or no report" >> consolidated-report.md
+          fi
+          
+          if [ "${{ inputs.enable_secrets_scanning }}" = "true" ]; then
+            if [ -f "trivy-secrets.sarif" ]; then
+              COUNT=$(jq '.runs[0].results | length' trivy-secrets.sarif 2>/dev/null || echo "0")
+              echo "- Trivy Secrets Scan: $COUNT findings" >> consolidated-report.md
+            fi
+          fi
+          
+          if [ -f "snyk-backend.sarif" ] || [ -f "snyk-frontend.sarif" ]; then
+            BACKEND_COUNT=$(jq '.runs[0].results | length' snyk-backend.sarif 2>/dev/null || echo "0")
+            FRONTEND_COUNT=$(jq '.runs[0].results | length' snyk-frontend.sarif 2>/dev/null || echo "0")
+            echo "- Snyk Dependency Scan: Backend=$BACKEND_COUNT, Frontend=$FRONTEND_COUNT findings" >> consolidated-report.md
+          elif [ "${{ inputs.enable_snyk }}" = "true" ]; then
+            echo "- Snyk Dependency Scan: Disabled or no report" >> consolidated-report.md
+          fi
+          
+          echo "" >> consolidated-report.md
+          echo "## Container Image Security Scans" >> consolidated-report.md
+          
+          if [ -f "trivy-backend-release.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' trivy-backend-release.sarif 2>/dev/null || echo "0")
+            echo "- Trivy Backend Image: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "trivy-frontend-release.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' trivy-frontend-release.sarif 2>/dev/null || echo "0")
+            echo "- Trivy Frontend Image: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "grype-backend-release.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' grype-backend-release.sarif 2>/dev/null || echo "0")
+            echo "- Grype Backend Image: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "grype-frontend-release.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' grype-frontend-release.sarif 2>/dev/null || echo "0")
+            echo "- Grype Frontend Image: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "snyk-container-backend.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' snyk-container-backend.sarif 2>/dev/null || echo "0")
+            echo "- Snyk Backend Container: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "snyk-container-frontend.sarif" ]; then
+            COUNT=$(jq '.runs[0].results | length' snyk-container-frontend.sarif 2>/dev/null || echo "0")
+            echo "- Snyk Frontend Container: $COUNT findings" >> consolidated-report.md
+          fi
+          
+          if [ -f "dockle-backend-report.json" ]; then
+            COUNT=$(jq '. | length' dockle-backend-report.json 2>/dev/null || echo "0")
+            echo "- Dockle Backend Best Practices: $COUNT issues" >> consolidated-report.md
+          fi
+          
+          if [ -f "dockle-frontend-report.json" ]; then
+            COUNT=$(jq '. | length' dockle-frontend-report.json 2>/dev/null || echo "0")
+            echo "- Dockle Frontend Best Practices: $COUNT issues" >> consolidated-report.md
+          fi
+          
+          echo "" >> consolidated-report.md
+          echo "## Artifacts Generated" >> consolidated-report.md
+          
+          SBOM_COUNT=0
+          [ -f "backend-release-sbom.cdx.json" ] && SBOM_COUNT=$((SBOM_COUNT+1))
+          [ -f "frontend-release-sbom.cdx.json" ] && SBOM_COUNT=$((SBOM_COUNT+1))
+          [ -f "backend-release-sbom.spdx.json" ] && SBOM_COUNT=$((SBOM_COUNT+1))
+          [ -f "frontend-release-sbom.spdx.json" ] && SBOM_COUNT=$((SBOM_COUNT+1))
+          
+          echo "- SBOMs Generated: $SBOM_COUNT files (CycloneDX + SPDX)" >> consolidated-report.md
+          
+          if [ "${{ inputs.enable_image_signing }}" = "true" ]; then
+            echo "- Image Signing: Enabled (Cosign keyless)" >> consolidated-report.md
+          else
+            echo "- Image Signing: Disabled" >> consolidated-report.md
+          fi
+          
+          if [ "${{ inputs.enable_socket }}" = "true" ]; then
+            echo "- Supply Chain Protection: Enabled (Socket.dev)" >> consolidated-report.md
+          else
+            echo "- Supply Chain Protection: Disabled" >> consolidated-report.md
+          fi
+          
+          if [ "${{ inputs.enable_dependency_track }}" = "true" ]; then
+            echo "- Dependency-Track Integration: Enabled" >> consolidated-report.md
+          else
+            echo "- Dependency-Track Integration: Disabled" >> consolidated-report.md
+          fi
+          
+          echo "" >> consolidated-report.md
+          echo "## Summary" >> consolidated-report.md
+          
+          TOTAL=0
+          for sarif in *.sarif; do
+            if [ -f "$sarif" ]; then
+              COUNT=$(jq '.runs[0].results | length' "$sarif" 2>/dev/null || echo "0")
+              TOTAL=$((TOTAL + COUNT))
+            fi
+          done
+          
+          echo "- Total Security Findings: $TOTAL" >> consolidated-report.md
+          echo "- Policy Enforcement: ${{ inputs.enforce_policies && 'Strict' || 'Advisory' }}" >> consolidated-report.md
+          echo "- Overall Security Status: ${{ needs.image-security-scan.result == 'success' && 'PASSED' || 'FAILED' }}" >> consolidated-report.md
+          
+          cat consolidated-report.md >> $GITHUB_STEP_SUMMARY
+          
+          echo "Total security findings: $TOTAL"
+          echo "Report saved to consolidated-report.md"
+
+      - name: Upload consolidated report
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: consolidated-security-report-${{ github.run_number }}
+          path: consolidated-report.md
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Generate release summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          
+          # Application Release Pipeline Results
+
+          ## Detected Components
+          - Backend present: ${{ needs.detect.outputs.has_backend }}
+          - Frontend present: ${{ needs.detect.outputs.has_frontend }}
+          - Backend image built: ${{ needs.detect.outputs.build_backend_image }}
+          - Frontend image built: ${{ needs.detect.outputs.build_frontend_image }}
+
+          ## Pipeline Status
+          | Stage | Status | Details |
+          |-------|--------|---------|
+          | Pre-release Security | ${{ needs.pre-release-security.result }} | SAST, secrets, dependency scans |
+          | License Compliance | ${{ needs.license-compliance.result }} | License checks |
+          | Supply Chain Security | ${{ needs.supply-chain-security.result }} | Scorecard, dependency review |
+          | Build & Push Images | ${{ needs.build-and-push-images.result }} | Multi-arch: ${{ inputs.enable_multi_arch }} |
+          | Image Security Scan | ${{ needs.image-security-scan.result }} | Trivy + Grype + SBOM + Cosign |
+          | Smoke Tests | ${{ needs.smoke-test.result }} | Health checks and accessibility |
+          | Promote to Latest | ${{ needs.promote-to-latest.result }} | ${{ inputs.promote_to_latest && 'Enabled' || 'Skipped' }} |
+
+          ## Security Features
+          - SBOM Generation: ${{ inputs.enable_sbom_generation && 'Enabled (CycloneDX + SPDX)' || 'Disabled' }}
+          - Image Signing: ${{ inputs.enable_image_signing && 'Enabled (Cosign keyless)' || 'Disabled' }}
+          - Multi-arch Builds: ${{ inputs.enable_multi_arch && 'Enabled (amd64 + arm64)' || 'Disabled' }}
+          - SLSA Provenance: ${{ inputs.enable_slsa_provenance && 'Enabled (Level 2+)' || 'Disabled' }}
+          - Dockle Scanning: ${{ inputs.enable_dockle && 'Enabled (Best Practices)' || 'Disabled' }}
+          - Dive Analysis: ${{ inputs.enable_dive && 'Enabled (Layer Analysis)' || 'Disabled' }}
+          - Dependency-Track: ${{ inputs.enable_dependency_track && 'Enabled' || 'Disabled' }}
+          - Code Scanning: ${{ inputs.enable_code_scanning && 'Enabled (SARIF upload)' || 'Disabled' }}
+          - Comprehensive SAST: ${{ inputs.run_comprehensive_sast && 'Enabled (Semgrep)' || 'Disabled' }}
+          - Snyk Scanning: ${{ inputs.enable_snyk && 'Enabled' || 'Disabled' }}
+          - Socket.dev: ${{ inputs.enable_socket && 'Enabled (Supply Chain)' || 'Disabled' }}
+          - OWASP Dependency-Check: ${{ inputs.enable_owasp_dependency_check && 'Enabled' || 'Disabled' }}
+          - Secrets Scanning: ${{ inputs.enable_secrets_scanning && 'Enabled (Gitleaks + TruffleHog + Trivy)' || 'Disabled' }}
+          - License Compliance: ${{ inputs.enable_license_compliance && 'Enabled' || 'Disabled' }}
+          - Supply Chain Security: ${{ inputs.enable_supply_chain_security && 'Enabled (Scorecard + Dependency Review)' || 'Disabled' }}
+          - Policy Enforcement: ${{ inputs.enforce_policies && 'Strict' || 'Advisory' }}
+
+          ## Artifacts Generated
+          EOF
+          
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
+            cat >> $GITHUB_STEP_SUMMARY <<EOF
+          - Backend Image: \`${{ needs.build-and-push-images.outputs.backend_image_name }}\`
+            - Digest: \`${{ needs.build-and-push-images.outputs.backend_digest || 'N/A' }}\`
+          EOF
+          fi
+          
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
+            cat >> $GITHUB_STEP_SUMMARY <<EOF
+          - Frontend Image: \`${{ needs.build-and-push-images.outputs.frontend_image_name }}\`
+            - Digest: \`${{ needs.build-and-push-images.outputs.frontend_digest || 'N/A' }}\`
+          EOF
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+
+          ## Scan Results Summary
+          - Pre-release security scan: ${{ needs.pre-release-security.result }}
+          - License compliance: ${{ needs.license-compliance.result }}
+          - Supply chain security: ${{ needs.supply-chain-security.result }}
+          - Container image scans: ${{ needs.image-security-scan.result }}
+          - Smoke tests: ${{ needs.smoke-test.result }}
+
+          ## Tags Created
+          - SHA Tag: \`${{ env.IMAGE_TAG }}\`
+          EOF
+          
+          if [ "${{ inputs.promote_to_latest }}" = "true" ]; then
+            cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          - Latest Tag: Promoted
+          EOF
+          else
+            cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          - Latest Tag: Not promoted (disabled in inputs)
+          EOF
+          fi
+          
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+
+          ---
+          Release pipeline completed on \`${{ github.ref_name }}\` at \`$(date -u +"%Y-%m-%d %H:%M:%S UTC")\`
+          Workflow Run: \`${{ github.run_number }}\`
+          See Consolidated Security Report above for detailed findings.
+          EOF
+
+      - name: Check release pipeline success
+        if: inputs.enforce_policies
+        env:
+          PRE_RELEASE_SECURITY_RESULT: ${{ needs.pre-release-security.result }}
+          LICENSE_COMPLIANCE_RESULT: ${{ needs.license-compliance.result }}
+          SUPPLY_CHAIN_SECURITY_RESULT: ${{ needs.supply-chain-security.result }}
+          IMAGE_SCAN_RESULT: ${{ needs.image-security-scan.result }}
+          SMOKE_TEST_RESULT: ${{ needs.smoke-test.result }}
+        run: |
+          failures=0
+
+          if [ "${PRE_RELEASE_SECURITY_RESULT}" != "success" ] && [ "${PRE_RELEASE_SECURITY_RESULT}" != "skipped" ]; then
+            echo "::error::Pre-release security validation failed"
+            failures=1
+          fi
+
+          if [ "${LICENSE_COMPLIANCE_RESULT}" != "success" ] && [ "${LICENSE_COMPLIANCE_RESULT}" != "skipped" ]; then
+            echo "::error::License compliance check failed"
+            failures=1
+          fi
+
+          if [ "${SUPPLY_CHAIN_SECURITY_RESULT}" != "success" ] && [ "${SUPPLY_CHAIN_SECURITY_RESULT}" != "skipped" ]; then
+            echo "::error::Supply chain security check failed"
+            failures=1
+          fi
+
+          if [ "${IMAGE_SCAN_RESULT}" != "success" ] && [ "${IMAGE_SCAN_RESULT}" != "skipped" ]; then
+            echo "::error::Image security scan failed"
+            failures=1
+          fi
+
+          if [ "${SMOKE_TEST_RESULT}" != "success" ] && [ "${SMOKE_TEST_RESULT}" != "skipped" ]; then
+            echo "::error::Smoke tests failed"
+            failures=1
+          fi
+
+          if [ "$failures" -ne 0 ]; then
+            echo "::error::Release pipeline failed security or functional checks."
+            exit 1
+          fi
