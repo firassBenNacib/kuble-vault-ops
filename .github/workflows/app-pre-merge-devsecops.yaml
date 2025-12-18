@@ -994,17 +994,15 @@ jobs:
           banned_found=false
 
           mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
-
+          
           echo "Attempting to generate license report..."
           LIC_FOUND=false
 
-          if grep -q "license-maven-plugin" pom.xml; then
-            echo "Using existing license-maven-plugin configuration"
-            mvn -B -ntp license:aggregate-add-third-party -Dlicense.excludedScopes=test,provided 2>&1 | grep -v "Download" || true
-          fi
+          echo "Using license-maven-plugin from POM..."
+          mvn -B -ntp license:add-third-party -Dlicense.excludedScopes=test,provided -Dlicense.outputDirectory=target/generated-sources/license -Dlicense.thirdPartyFilename=THIRD-PARTY.txt 2>&1 | grep -v "Download" || true
 
           echo "Trying direct plugin invocation..."
-          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.8:aggregate-add-third-party -Dlicense.excludedScopes=test,provided 2>&1 | grep -v "Download" || true
+          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.7.0:add-third-party -Dlicense.excludedScopes=test,provided -Dlicense.outputDirectory=target/generated-sources/license -Dlicense.thirdPartyFilename=THIRD-PARTY.txt 2>&1 | grep -v "Download" || true
 
           for lic_file in "target/generated-sources/license/THIRD-PARTY.txt" "target/THIRD-PARTY.txt" "THIRD-PARTY.txt"; do
             if [ -f "$lic_file" ]; then
@@ -1021,7 +1019,7 @@ jobs:
               break
             fi
           done
-
+          
           if [ "$LIC_FOUND" = "false" ] && [ -f "target/dependency-tree.txt" ]; then
             echo "::warning::No license file generated, checking dependency tree for banned terms"
             echo "Note: This is less accurate but better than nothing"
@@ -1032,7 +1030,7 @@ jobs:
               fi
             done
           fi
-
+          
           echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
@@ -1046,13 +1044,13 @@ jobs:
           npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
           npm ci --prefer-offline --no-audit
           license-checker --json --out licenses.json
-
+          
           python3 - <<'PY'
           import json, os
-
+          
           banned=os.environ.get("BANNED_LICENSE_TOKENS","").split(",")
           banned=[b.strip() for b in banned if b.strip()]
-
+          
           data=json.load(open("licenses.json", encoding="utf-8"))
           bad=[]
           for pkg, info in data.items():
@@ -1060,10 +1058,10 @@ jobs:
             s=";".join(lic) if isinstance(lic,list) else str(lic)
             if any(tok in s for tok in banned):
               bad.append((pkg,s))
-
+          
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"banned_count={len(bad)}\n")
-
+          
           if bad:
             print("First offenders:")
             for pkg,s in bad[:50]:
@@ -1091,17 +1089,17 @@ jobs:
           NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
         run: |
           failures=0
-
+          
           if [ "${MAVEN_BANNED}" = "true" ]; then
             echo "::error::Maven dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS})"
             failures=1
           fi
-
+          
           if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
             echo "::error::NPM dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS}); count=${NPM_BANNED_COUNT}"
             failures=1
           fi
-
+          
           if [ "$failures" -ne 0 ]; then
             echo "::error::License compliance check failed."
             exit 1
