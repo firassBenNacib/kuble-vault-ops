@@ -523,7 +523,8 @@ jobs:
       - name: Evaluate quality and SAST
         if: always() && inputs.enforce_policies
         env:
-          DEPCHECK_EXIT: ${{ steps.depcheck.outcome == 'success' && '0' || '1' }}
+          DEPCHECK_ENABLED: ${{ inputs.enable_owasp_dependency_check }}
+          DEPCHECK_OUTCOME: ${{ steps.depcheck.outcome }}
           NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
           NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
           SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
@@ -539,9 +540,11 @@ jobs:
             failures=1
           fi
 
-          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
-            echo "::error::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
-            failures=1
+          if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_ENABLED}" = "true" ]; then
+            if [ "${DEPCHECK_OUTCOME}" != "success" ]; then
+              echo "::error::Dependency check failed or found policy-breaking vulns (outcome=${DEPCHECK_OUTCOME})"
+              failures=1
+            fi
           fi
 
           if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
@@ -564,9 +567,9 @@ jobs:
           fi
 
           if [ "$failures" -ne 0 ]; then
-            echo "::error::One or more quality/SAST checks failed policy."
             exit 1
           fi
+
 
   secrets-and-filesystem-scan:
     runs-on: ubuntu-latest
@@ -990,50 +993,29 @@ jobs:
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
           set -e
-          exit_code=0
           banned_found=false
-
-          mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
           
-          echo "Attempting to generate license report..."
-          LIC_FOUND=false
+          mvn -B -ntp license:add-third-party \
+            -Dlicense.excludedScopes=test,provided \
+            -Dlicense.outputDirectory=target/generated-sources/license \
+            -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
+            -Dskip=false 2>&1 | grep -v "Parameter 'skip' is unknown" || true
 
-          echo "Using license-maven-plugin from POM..."
-          mvn -B -ntp license:add-third-party -Dlicense.excludedScopes=test,provided -Dlicense.outputDirectory=target/generated-sources/license -Dlicense.thirdPartyFilename=THIRD-PARTY.txt 2>&1 | grep -v "Download" || true
-
-          echo "Trying direct plugin invocation..."
-          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.7.0:add-third-party -Dlicense.excludedScopes=test,provided -Dlicense.outputDirectory=target/generated-sources/license -Dlicense.thirdPartyFilename=THIRD-PARTY.txt 2>&1 | grep -v "Download" || true
-
-          for lic_file in "target/generated-sources/license/THIRD-PARTY.txt" "target/THIRD-PARTY.txt" "THIRD-PARTY.txt"; do
-            if [ -f "$lic_file" ]; then
-              echo "Found license file: $lic_file"
-              LIC_FOUND=true
-              IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
-              for token in "${TOKENS[@]}"; do
-                if grep -iq "$token" "$lic_file"; then
-                  echo "::error::Found banned license token '$token' in: $lic_file"
-                  banned_found=true
-                  exit_code=1
-                fi
-              done
-              break
-            fi
-          done
-          
-          if [ "$LIC_FOUND" = "false" ] && [ -f "target/dependency-tree.txt" ]; then
-            echo "::warning::No license file generated, checking dependency tree for banned terms"
-            echo "Note: This is less accurate but better than nothing"
+          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
+            echo "Found license file"
+            LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
-              if grep -iq "$token" "target/dependency-tree.txt"; then
-                echo "::warning::Possible banned license token '$token' found in dependency tree"
+              if grep -iq "$token" "$LIC_FILE"; then
+                echo "::error::Found banned license token '$token' in: $LIC_FILE"
+                banned_found=true
               fi
             done
+          else
+            echo "::warning::No license file generated at target/generated-sources/license/THIRD-PARTY.txt"
           fi
           
           echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
-        continue-on-error: true
 
       - name: npm license report + strict SPDX token enforcement
         if: needs.detect.outputs.has_frontend == 'true'
