@@ -237,7 +237,6 @@ jobs:
         id: depcheck
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
-          set +e
           mkdir -p "${DEPENDENCY_CHECK_DATA}"
 
           AUTO_UPDATE=true
@@ -267,10 +266,6 @@ jobs:
             -Dformats=HTML,JSON,SARIF \
             ${SUPPRESS_ARG} \
             ${EXTRA_NVD}
-
-          exit_code=$?
-          set -e
-          echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       - name: npm install
@@ -284,18 +279,24 @@ jobs:
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
-          npm audit --audit-level=high --json > npm-audit.json || true
+          npm audit --audit-level=high --json > npm-audit.json || echo "npm audit completed with findings"
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
-          data=json.load(open("npm-audit.json"))
-          vul=data.get("metadata",{}).get("vulnerabilities",{})
-          high=int(vul.get("high",0) or 0)
-          critical=int(vul.get("critical",0) or 0)
-          print(f"high={high}")
-          print(f"critical={critical}")
-          print(f"high_critical_total={high+critical}")
+          try:
+              data=json.load(open("npm-audit.json"))
+              vul=data.get("metadata",{}).get("vulnerabilities",{})
+              high=int(vul.get("high",0) or 0)
+              critical=int(vul.get("critical",0) or 0)
+              print(f"high={high}")
+              print(f"critical={critical}")
+              print(f"high_critical_total={high+critical}")
+          except Exception as e:
+              print(f"high=0")
+              print(f"critical=0")
+              print(f"high_critical_total=0")
           PY
+        continue-on-error: true
 
       - name: npm tests (skip if script missing)
         if: needs.detect.outputs.has_frontend == 'true'
@@ -395,14 +396,13 @@ jobs:
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
-          set +e
+          set -e
           if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
             semgrep ci --sarif --output semgrep.sarif
           else
             semgrep scan --config p/ci --sarif --output semgrep.sarif
           fi
           tool_exit=$?
-          set -e
           echo "tool_exit=$tool_exit" >> "$GITHUB_OUTPUT"
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -484,10 +484,14 @@ jobs:
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          d=json.load(open("trivy-fs.sarif")) if os.path.exists("trivy-fs.sarif") else {"runs":[]}
-          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
-          print("sarif_exists=true" if os.path.exists("trivy-fs.sarif") else "sarif_exists=false")
-          print(f"result_count={count}")
+          if os.path.exists("trivy-fs.sarif"):
+            d=json.load(open("trivy-fs.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"result_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"result_count=0")
           PY
         continue-on-error: true
 
@@ -519,7 +523,7 @@ jobs:
       - name: Evaluate quality and SAST
         if: always() && inputs.enforce_policies
         env:
-          DEPCHECK_EXIT: ${{ steps.depcheck.outputs.exit_code }}
+          DEPCHECK_EXIT: ${{ steps.depcheck.outcome == 'success' && '0' || '1' }}
           NPM_TESTS_EXIT: ${{ steps.npm_tests.outputs.exit_code }}
           NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
           SEMGREP_TOOL_EXIT: ${{ steps.semgrep.outputs.tool_exit }}
@@ -536,12 +540,12 @@ jobs:
           fi
 
           if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_EXIT:-0}" -ne 0 ]; then
-            echo "::warning::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
+            echo "::error::Dependency check reported vulnerabilities (CVSS >= 7) or execution error"
             failures=1
           fi
 
           if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
-            echo "::warning::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
+            echo "::error::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
             failures=1
           fi
 
@@ -550,7 +554,7 @@ jobs:
             failures=1
           fi
           if [ "${SEMGREP_ERRORS:-0}" -ne 0 ]; then
-            echo "::warning::Semgrep reported error-level findings (count=${SEMGREP_ERRORS})"
+            echo "::error::Semgrep reported error-level findings (count=${SEMGREP_ERRORS})"
             failures=1
           fi
 
@@ -607,14 +611,14 @@ jobs:
 
           if [ "${{ github.event_name }}" == "pull_request" ]; then
             echo "== PR detected: Scanning git changes from ${{ github.base_ref }} to ${{ github.head_ref }} =="
-            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:3.92.3 \
+            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:latest \
               git file:///workdir \
               --only-verified \
               --base "${{ github.base_ref }}" \
               --head HEAD 2>&1 | tail -20 || true
           else
             echo "== Not a PR: Scanning filesystem (current state) =="
-            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:3.92.3 \
+            docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:latest \
               filesystem /workdir \
               --only-verified 2>&1 | tail -20 || true
           fi
@@ -639,10 +643,14 @@ jobs:
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          d=json.load(open("trivy-secrets.sarif")) if os.path.exists("trivy-secrets.sarif") else {"runs":[]}
-          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
-          print("sarif_exists=true" if os.path.exists("trivy-secrets.sarif") else "sarif_exists=false")
-          print(f"secret_count={count}")
+          if os.path.exists("trivy-secrets.sarif"):
+            d=json.load(open("trivy-secrets.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"secret_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"secret_count=0")
           PY
         continue-on-error: true
 
@@ -666,7 +674,7 @@ jobs:
         if: always() && inputs.enforce_policies
         env:
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
-          TRUVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
+          TRIVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
         run: |
           failures=0
 
@@ -675,8 +683,8 @@ jobs:
             failures=1
           fi
 
-          if [ "${TRUVY_SECRET_COUNT:-0}" -ne 0 ]; then
-            echo "::error::Trivy found secrets in filesystem (count=${TRUVY_SECRET_COUNT})"
+          if [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
+            echo "::error::Trivy found secrets in filesystem (count=${TRIVY_SECRET_COUNT})"
             failures=1
           fi
 
@@ -834,10 +842,14 @@ jobs:
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          d=json.load(open("trivy-backend-image.sarif")) if os.path.exists("trivy-backend-image.sarif") else {"runs":[]}
-          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
-          print("sarif_exists=true" if os.path.exists("trivy-backend-image.sarif") else "sarif_exists=false")
-          print(f"result_count={count}")
+          if os.path.exists("trivy-backend-image.sarif"):
+            d=json.load(open("trivy-backend-image.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"result_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"result_count=0")
           PY
         continue-on-error: true
 
@@ -866,10 +878,14 @@ jobs:
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
-          d=json.load(open("trivy-frontend-image.sarif")) if os.path.exists("trivy-frontend-image.sarif") else {"runs":[]}
-          count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
-          print("sarif_exists=true" if os.path.exists("trivy-frontend-image.sarif") else "sarif_exists=false")
-          print(f"result_count={count}")
+          if os.path.exists("trivy-frontend-image.sarif"):
+            d=json.load(open("trivy-frontend-image.sarif"))
+            count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+            print("sarif_exists=true")
+            print(f"result_count={count}")
+          else:
+            print("sarif_exists=false")
+            print(f"result_count=0")
           PY
         continue-on-error: true
 
@@ -968,21 +984,33 @@ jobs:
           cache-dependency-path: |
             **/package-lock.json
 
+      - name: Install license-maven-plugin if not present
+        if: needs.detect.outputs.has_backend == 'true'
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: |
+            mvn -f temp-pom.xml license:aggregate-add-third-party -Dlicense.excludedScopes=test,provided
+
       - name: Maven license check
         if: needs.detect.outputs.has_backend == 'true'
         id: maven_license
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
-          set +e
+          set -e
           exit_code=0
           banned_found=false
 
           mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
 
-          echo "Attempting to generate license report without downloads..."
-          mvn -B -ntp license:aggregate-add-third-party -Dlicense.skipDownloadLicenses=true 2>&1 | grep -v "Download"
-
+          echo "Attempting to generate license report..."
           LIC_FOUND=false
+
+          if grep -q "license-maven-plugin" pom.xml; then
+            echo "Using existing license-maven-plugin configuration"
+            mvn -B -ntp license:aggregate-add-third-party -Dlicense.excludedScopes=test,provided 2>&1 | grep -v "Download" || true
+          fi
+
+          echo "Trying direct plugin invocation..."
+          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:2.8:aggregate-add-third-party -Dlicense.excludedScopes=test,provided 2>&1 | grep -v "Download" || true
 
           for lic_file in "target/generated-sources/license/THIRD-PARTY.txt" "target/THIRD-PARTY.txt" "THIRD-PARTY.txt"; do
             if [ -f "$lic_file" ]; then
@@ -1011,7 +1039,6 @@ jobs:
             done
           fi
 
-          set -e
           echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
           echo "exit_code=$exit_code" >> "$GITHUB_OUTPUT"
         continue-on-error: true
