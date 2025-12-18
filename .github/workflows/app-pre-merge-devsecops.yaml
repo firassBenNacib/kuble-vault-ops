@@ -977,38 +977,38 @@ jobs:
           exit_code=0
           banned_found=false
 
-          mvn -B -ntp license:license-list -Dlicense.skipDownloadLicenses=true -Dlicense.jsonOutputFile=target/licenses.json
+          mvn -B -ntp dependency:tree -DoutputFile=target/dependency-tree.txt
 
-          if [ -f "target/licenses.json" ]; then
-            echo "Checking licenses.json for banned licenses..."
-            python3 - <<'PY'
-            import json, sys, os
-            
-            banned_tokens = os.environ.get("BANNED_LICENSE_TOKENS", "").split(",")
-            banned_tokens = [t.strip() for t in banned_tokens if t.strip()]
-            
-            try:
-              with open("target/licenses.json", "r") as f:
-                data = json.load(f)
-              
-              for dep in data.get("dependencies", []):
-                licenses = dep.get("licenses", [])
-                for license_info in licenses:
-                  license_name = license_info.get("name", "")
-                  for banned in banned_tokens:
-                    if banned.lower() in license_name.lower():
-                      print(f"::error::Banned license '{banned}' found in: {dep.get('artifactId')}")
-                      sys.exit(1)
-            except Exception as e:
-              print(f"::warning::Could not parse licenses.json: {e}")
-              sys.exit(0)
-            PY
-            exit_code=$?
-            if [ $exit_code -ne 0 ]; then
-              banned_found=true
+          echo "Attempting to generate license report without downloads..."
+          mvn -B -ntp license:aggregate-add-third-party -Dlicense.skipDownloadLicenses=true 2>&1 | grep -v "Download"
+
+          LIC_FOUND=false
+
+          for lic_file in "target/generated-sources/license/THIRD-PARTY.txt" "target/THIRD-PARTY.txt" "THIRD-PARTY.txt"; do
+            if [ -f "$lic_file" ]; then
+              echo "Found license file: $lic_file"
+              LIC_FOUND=true
+              IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+              for token in "${TOKENS[@]}"; do
+                if grep -iq "$token" "$lic_file"; then
+                  echo "::error::Found banned license token '$token' in: $lic_file"
+                  banned_found=true
+                  exit_code=1
+                fi
+              done
+              break
             fi
-          else
-            echo "::warning::Could not generate license file. Network restrictions may be blocking downloads."
+          done
+
+          if [ "$LIC_FOUND" = "false" ] && [ -f "target/dependency-tree.txt" ]; then
+            echo "::warning::No license file generated, checking dependency tree for banned terms"
+            echo "Note: This is less accurate but better than nothing"
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+            for token in "${TOKENS[@]}"; do
+              if grep -iq "$token" "target/dependency-tree.txt"; then
+                echo "::warning::Possible banned license token '$token' found in dependency tree"
+              fi
+            done
           fi
 
           set -e
@@ -1055,7 +1055,9 @@ jobs:
         with:
           name: license-reports-${{ github.run_number }}
           path: |
-            ${{ needs.detect.outputs.backend_dir }}/target/licenses/
+            ${{ needs.detect.outputs.backend_dir }}/target/generated-sources/license/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/THIRD-PARTY.txt
             ${{ needs.detect.outputs.backend_dir }}/target/dependency-tree.txt
             ${{ needs.detect.outputs.frontend_dir }}/licenses.json
           retention-days: 90
