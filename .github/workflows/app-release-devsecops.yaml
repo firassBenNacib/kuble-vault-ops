@@ -32,7 +32,7 @@ on:
         description: 'Enable Dive image layer analysis'
         required: false
         type: boolean
-        default: false
+        default: true
       enable_slsa_provenance:
         description: 'Enable SLSA provenance generation'
         required: false
@@ -72,7 +72,7 @@ on:
         description: 'Enable OWASP Dependency-Check (Java backend only)'
         required: false
         type: boolean
-        default: true
+        default: false
       enable_secrets_scanning:
         description: 'Enable comprehensive secrets scanning'
         required: false
