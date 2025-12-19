@@ -274,10 +274,10 @@ jobs:
           
           if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
             echo "Using Semgrep App with configured policies..."
-            semgrep ci --sarif --output semgrep-release.sarif || echo "Semgrep scan failed, continuing..."
+            semgrep ci --sarif --output semgrep-release.sarif
           else
             echo "Using local security-audit rules..."
-            semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif || echo "Semgrep scan failed, continuing..."
+            semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif
           fi
           
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -315,7 +315,7 @@ jobs:
             --exit-code 0 \
             --no-progress \
             --format table \
-            . || echo "Trivy FS scan failed, continuing..."
+            .
 
           echo "Trivy FS Pre-Build Vulnerability Scan (SARIF output)"
           trivy fs \
@@ -325,7 +325,7 @@ jobs:
             --no-progress \
             --format sarif \
             --output trivy-prebuild-vuln.sarif \
-            . || echo "Trivy FS SARIF generation failed, continuing..."
+            .
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -352,14 +352,14 @@ jobs:
             --format table \
             --exit-code 0 \
             --no-progress \
-            . || echo "Trivy secret scan failed, continuing..."
+            .
 
           trivy fs --scanners secret \
             --format sarif \
             --output trivy-secrets.sarif \
             --exit-code 0 \
             --no-progress \
-            . || echo "Trivy secret SARIF generation failed, continuing..."
+            .
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -391,7 +391,7 @@ jobs:
           echo "Running TruffleHog secrets scan..."
           docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:latest \
             filesystem /workdir \
-            --only-verified 2>&1 | tail -20 || echo "TruffleHog scan failed, continuing..."
+            --only-verified 2>&1 | tail -20
 
       - name: Set up JDK (backend)
         if: needs.detect.outputs.has_backend == 'true'
@@ -455,7 +455,7 @@ jobs:
               -DautoUpdate="${AUTO_UPDATE}" \
               -Dformats=HTML,JSON,SARIF \
               ${SUPPRESS_ARG} \
-              ${EXTRA_NVD} || echo "Maven dependency-check failed, continuing..."
+              ${EXTRA_NVD}
           elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
             echo "Running Gradle dependency-check..."
             ./gradlew dependencyCheckAnalyze \
@@ -463,7 +463,7 @@ jobs:
               -DdependencyCheck.autoUpdate="${AUTO_UPDATE}" \
               -DdependencyCheck.format=HTML,JSON,SARIF \
               -DdependencyCheck.failBuildOnCVSS=7 \
-              ${EXTRA_NVD} || echo "Gradle dependency-check failed, continuing..."
+              ${EXTRA_NVD}
           else
             echo "No build file found for dependency-check"
           fi
@@ -471,7 +471,7 @@ jobs:
       - name: npm install
         if: needs.detect.outputs.has_frontend == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
-        run: npm ci --prefer-offline --no-audit --no-fund || echo "npm install failed, continuing..."
+        run: npm ci --prefer-offline --no-audit --no-fund
 
       - name: npm audit
         if: needs.detect.outputs.has_frontend == 'true'
@@ -479,7 +479,7 @@ jobs:
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
-          npm audit --audit-level=high --json > npm-audit.json 2>/dev/null || echo "npm audit completed with findings or failed"
+          npm audit --audit-level=high --json > npm-audit.json 2>/dev/null || true
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
@@ -507,20 +507,19 @@ jobs:
           echo "Running Socket.dev supply chain protection..."
           
           if [ -z "${SOCKET_API_TOKEN:-}" ]; then
-            echo "Warning: SOCKET_API_TOKEN is not set. Skipping Socket.dev scan."
-            echo "To enable Socket.dev, create an API token at https://socket.dev and add it as a secret named SOCKET_API_TOKEN"
-            exit 0
+            echo "::error::SOCKET_API_TOKEN is not set. Please create a Socket API token at https://socket.dev and add it as a secret named SOCKET_API_TOKEN"
+            exit 1
           fi
           
-          npm install -g @socketsecurity/cli@latest || echo "Failed to install Socket CLI, trying npx..."
-          socket ci --github-token=${{ secrets.GITHUB_TOKEN }} --token="${SOCKET_API_TOKEN}" || echo "Socket.dev scan failed, continuing..."
+          npm install -g @socketsecurity/cli@latest
+          socket ci --github-token=${{ secrets.GITHUB_TOKEN }} --token="${SOCKET_API_TOKEN}"
 
       - name: Install Snyk CLI
-        if: inputs.enable_snyk && env.SNYK_TOKEN != ''
+        if: inputs.enable_snyk
         run: |
           echo "Installing Snyk CLI..."
-          npm install -g snyk@${{ env.SNYK_VERSION }} || echo "Failed to install Snyk CLI, continuing..."
-          snyk --version || echo "Snyk CLI not available"
+          npm install -g snyk@${{ env.SNYK_VERSION }}
+          snyk --version
 
       - name: Snyk backend test
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_backend == 'true'
@@ -528,7 +527,7 @@ jobs:
         id: snyk_backend
         run: |
           echo "Running Snyk backend security scan..."
-          snyk test --severity-threshold=high --sarif-file-output=snyk-backend.sarif || echo "Snyk backend scan failed, continuing..."
+          snyk test --severity-threshold=high --sarif-file-output=snyk-backend.sarif
 
       - name: Snyk frontend test
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_frontend == 'true'
@@ -536,7 +535,7 @@ jobs:
         id: snyk_frontend
         run: |
           echo "Running Snyk frontend security scan..."
-          snyk test --severity-threshold=high --sarif-file-output=snyk-frontend.sarif || echo "Snyk frontend scan failed, continuing..."
+          snyk test --severity-threshold=high --sarif-file-output=snyk-frontend.sarif
 
       - name: Upload Semgrep SARIF artifact
         if: steps.semgrep_release.outputs.sarif_exists == 'true'
@@ -794,11 +793,11 @@ jobs:
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
-          npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }} || echo "Failed to install license-checker, continuing..."
-          npm ci --prefer-offline --no-audit --no-fund || echo "npm install failed, continuing..."
+          npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
+          npm ci --prefer-offline --no-audit --no-fund
           
           if command -v license-checker &> /dev/null; then
-            license-checker --json --out licenses.json 2>/dev/null || echo "license-checker failed, continuing..."
+            license-checker --json --out licenses.json 2>/dev/null || true
           else
             echo "license-checker not available"
             echo "banned_count=0" >> "$GITHUB_OUTPUT"
@@ -881,7 +880,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
-    if: inputs.enable_supply_chain_security && (github.ref_name == 'main' || github.event_name == 'pull_request')
+    if: inputs.enable_supply_chain_security
     permissions:
       contents: read
       security-events: write
@@ -899,30 +898,44 @@ jobs:
           fetch-depth: 0
 
       - name: Run OpenSSF Scorecard
-        if: github.ref_name == 'main'
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
-        with:
-          results_file: scorecard.sarif
-          results_format: sarif
-          publish_results: false
-
-      - name: Dependency Review
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261
-        with:
-          fail-on-severity: high
+        run: |
+          echo "Running OpenSSF Scorecard..."
+          curl -sSfL https://raw.githubusercontent.com/ossf/scorecard-action/main/install.sh | sh -s -- -b /usr/local/bin v4.13.0
+          scorecard --repo=${{ github.repository }} --checks=Security-Policy,SAST,Branch-Protection,Code-Review,Dangerous-Workflow,Pinned-Dependencies,Token-Permissions,Vulnerabilities --format=json --show-details > scorecard.json
+          
+          # Check if scorecard passed
+          python3 - <<'PY'
+          import json, os
+          data = json.load(open('scorecard.json'))
+          overall_score = data.get('score', 0)
+          checks = data.get('checks', [])
+          
+          print(f"Overall Scorecard Score: {overall_score}")
+          
+          if overall_score < 7.0:
+            print("::error::OpenSSF Scorecard score below 7.0 (production threshold)")
+            exit(1)
+            
+          # Check for critical failures
+          critical_checks = ['Security-Policy', 'SAST', 'Branch-Protection', 'Pinned-Dependencies']
+          for check in checks:
+            if check['name'] in critical_checks and check['score'] < 7:
+              print(f"::error::{check['name']} score is {check['score']} (below production threshold)")
+              exit(1)
+          PY
 
       - name: Upload Scorecard SARIF to code scanning
-        if: inputs.enable_code_scanning && hashFiles('scorecard.sarif') != ''
+        if: inputs.enable_code_scanning && hashFiles('scorecard.json') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
-          sarif_file: scorecard.sarif
+          sarif_file: scorecard.json
           category: scorecard-release
 
   build-and-push-images:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect, pre-release-security, license-compliance, supply-chain-security]
+    if: needs.detect.outputs.build_any_image == 'true'
     permissions:
       contents: read
       packages: write
@@ -1030,6 +1043,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect, build-and-push-images]
+    if: needs.detect.outputs.build_any_image == 'true'
     permissions:
       contents: read
       security-events: write
@@ -1057,12 +1071,12 @@ jobs:
         if: inputs.enable_sbom_generation
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/syft/${{ env.SYFT_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.SYFT_VERSION }}
-          syft version || echo "Failed to install Syft"
+          syft version
 
       - name: Install Grype
         run: |
           curl -sSfL https://raw.githubusercontent.com/anchore/grype/${{ env.GRYPE_VERSION }}/install.sh | sh -s -- -b /usr/local/bin ${{ env.GRYPE_VERSION }}
-          grype version || echo "Failed to install Grype"
+          grype version
 
       - name: Install Cosign
         if: inputs.enable_image_signing
@@ -1072,15 +1086,15 @@ jobs:
         if: inputs.enable_dockle
         run: |
           curl -sSfL https://raw.githubusercontent.com/goodwithtech/dockle/master/install.sh | sh -s -- -b /usr/local/bin ${{ env.DOCKLE_VERSION }}
-          dockle --version || echo "Failed to install Dockle"
+          dockle --version
 
       - name: Install Dive
         if: inputs.enable_dive
         run: |
-          wget https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/dive_${{ env.DIVE_VERSION }}_linux_amd64.deb || echo "Failed to download Dive"
-          sudo apt-get install -f ./dive_${{ env.DIVE_VERSION }}_linux_amd64.deb 2>/dev/null || echo "Failed to install Dive"
-          rm -f dive_${{ env.DIVE_VERSION }}_linux_amd64.deb || true
-          dive --version || echo "Dive not available"
+          wget https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          sudo apt-get install -f ./dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          rm -f dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          dive --version
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
@@ -1102,22 +1116,22 @@ jobs:
         run: |
           syft ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             -o cyclonedx-json \
-            --file backend-release-sbom.cdx.json 2>/dev/null || echo "Failed to generate CycloneDX SBOM for backend"
+            --file backend-release-sbom.cdx.json
           
           syft ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             -o spdx-json \
-            --file backend-release-sbom.spdx.json 2>/dev/null || echo "Failed to generate SPDX SBOM for backend"
+            --file backend-release-sbom.spdx.json
 
       - name: Generate frontend SBOM with Syft
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           syft ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             -o cyclonedx-json \
-            --file frontend-release-sbom.cdx.json 2>/dev/null || echo "Failed to generate CycloneDX SBOM for frontend"
+            --file frontend-release-sbom.cdx.json
           
           syft ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             -o spdx-json \
-            --file frontend-release-sbom.spdx.json 2>/dev/null || echo "Failed to generate SPDX SBOM for frontend"
+            --file frontend-release-sbom.spdx.json
 
       - name: Validate SBOM quality
         if: inputs.enable_sbom_generation
@@ -1127,18 +1141,19 @@ jobs:
             local sbom_file=$1
             if [[ ! -f "$sbom_file" ]]; then
               echo "SBOM file not found: $sbom_file"
-              return 0
+              return 1
             fi
             echo "Checking $sbom_file"
 
             if ! jq -e '.metadata and .components' "$sbom_file" > /dev/null 2>&1; then
-              echo "ERROR: $sbom_file is missing required top-level structure (metadata, components)."
+              echo "::error::$sbom_file is missing required top-level structure (metadata, components)."
               exit 1
             fi
             
             COMPONENT_COUNT=$(jq '.components | length' "$sbom_file")
             if [ "$COMPONENT_COUNT" -eq 0 ]; then
-              echo "WARNING: $sbom_file contains zero components. It may be empty."
+              echo "::error::$sbom_file contains zero components. It may be empty."
+              exit 1
             else
               echo "SUCCESS: $sbom_file is valid and contains $COMPONENT_COUNT components."
             fi
@@ -1163,7 +1178,7 @@ jobs:
             
             if [ ! -f "$sbom_file" ]; then
               echo "SBOM file not found: $sbom_file"
-              return 0
+              return 1
             fi
             
             echo "Uploading $sbom_file for project: $project_name"
@@ -1197,11 +1212,17 @@ jobs:
                 -H "X-Api-Key: $DEPENDENCY_TRACK_API_KEY" \
                 -F "project=$PROJECT_UUID" \
                 -F "bom=@$sbom_file" \
-                "$DEPENDENCY_TRACK_URL/api/v1/bom" \
-                && echo "Upload successful for $project_name" \
-                || echo "Upload failed for $project_name"
+                "$DEPENDENCY_TRACK_URL/api/v1/bom"
+              
+              if [ $? -eq 0 ]; then
+                echo "Upload successful for $project_name"
+              else
+                echo "::error::Upload failed for $project_name"
+                exit 1
+              fi
             else
-              echo "Failed to get or create project for $project_name"
+              echo "::error::Failed to get or create project for $project_name"
+              exit 1
             fi
           }
           
@@ -1220,7 +1241,7 @@ jobs:
           echo "Running Snyk container scan for backend image..."
           snyk container test ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             --severity-threshold=high \
-            --sarif-file-output=snyk-container-backend.sarif || echo "Snyk container backend scan failed, continuing..."
+            --sarif-file-output=snyk-container-backend.sarif
 
       - name: Snyk container test (frontend)
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_frontend_image == 'true'
@@ -1229,7 +1250,7 @@ jobs:
           echo "Running Snyk container scan for frontend image..."
           snyk container test ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             --severity-threshold=high \
-            --sarif-file-output=snyk-container-frontend.sarif || echo "Snyk container frontend scan failed, continuing..."
+            --sarif-file-output=snyk-container-frontend.sarif
 
       - name: Trivy scan backend image
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -1243,7 +1264,7 @@ jobs:
             --exit-code 0 \
             --no-progress \
             --format table \
-            ${{ needs.build-and-push-images.outputs.backend_image_name }} || echo "Trivy backend table scan failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
 
           echo "Trivy image scan (backend) - SARIF output"
           trivy image \
@@ -1252,7 +1273,7 @@ jobs:
             --no-progress \
             --format sarif \
             --output trivy-backend-release.sarif \
-            ${{ needs.build-and-push-images.outputs.backend_image_name }} || echo "Trivy backend SARIF generation failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -1282,7 +1303,7 @@ jobs:
             --exit-code 0 \
             --no-progress \
             --format table \
-            ${{ needs.build-and-push-images.outputs.frontend_image_name }} || echo "Trivy frontend table scan failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
 
           echo "Trivy image scan (frontend) - SARIF output"
           trivy image \
@@ -1291,7 +1312,7 @@ jobs:
             --no-progress \
             --format sarif \
             --output trivy-frontend-release.sarif \
-            ${{ needs.build-and-push-images.outputs.frontend_image_name }} || echo "Trivy frontend SARIF generation failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -1317,7 +1338,7 @@ jobs:
           grype ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             --fail-on "${GRYPE_FAIL_SEVERITY}" \
             -o sarif \
-            --file grype-backend-release.sarif || echo "Grype backend scan failed, continuing..."
+            --file grype-backend-release.sarif
 
       - name: Grype scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
@@ -1327,7 +1348,7 @@ jobs:
           grype ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             --fail-on "${GRYPE_FAIL_SEVERITY}" \
             -o sarif \
-            --file grype-frontend-release.sarif || echo "Grype frontend scan failed, continuing..."
+            --file grype-frontend-release.sarif
 
       - name: Dockle scan backend image
         if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
@@ -1339,7 +1360,7 @@ jobs:
             --exit-level "${DOCKLE_SEVERITY}" \
             --format json \
             --output dockle-backend-report.json \
-            ${{ needs.build-and-push-images.outputs.backend_image_name }} 2>&1 | grep -v "level=INFO" || echo "Dockle backend scan failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.backend_image_name }} 2>&1 | grep -v "level=INFO" || true
           
           echo "Dockle summary:"
           if [ -f "dockle-backend-report.json" ]; then
@@ -1356,7 +1377,7 @@ jobs:
             --exit-level "${DOCKLE_SEVERITY}" \
             --format json \
             --output dockle-frontend-report.json \
-            ${{ needs.build-and-push-images.outputs.frontend_image_name }} 2>&1 | grep -v "level=INFO" || echo "Dockle frontend scan failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }} 2>&1 | grep -v "level=INFO" || true
           
           echo "Dockle summary:"
           if [ -f "dockle-frontend-report.json" ]; then
@@ -1369,7 +1390,7 @@ jobs:
           echo "Dive image layer analysis (backend)"
           CI=true dive ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             --ci \
-            --lowestEfficiency=0.8 || echo "Dive backend analysis failed, continuing..."
+            --lowestEfficiency=0.8
 
       - name: Dive analysis frontend image
         if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
@@ -1377,7 +1398,7 @@ jobs:
           echo "Dive image layer analysis (frontend)"
           CI=true dive ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             --ci \
-            --lowestEfficiency=0.8 || echo "Dive frontend analysis failed, continuing..."
+            --lowestEfficiency=0.8
 
       - name: Sign backend image with Cosign
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
@@ -1387,7 +1408,7 @@ jobs:
             --annotations git-sha=${{ env.IMAGE_TAG }} \
             --annotations workflow-run=${{ github.run_id }} \
             --annotations github-ref=${{ github.ref }} \
-            ${{ needs.build-and-push-images.outputs.backend_image_name }} || echo "Cosign backend signing failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
 
       - name: Sign frontend image with Cosign
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
@@ -1397,7 +1418,7 @@ jobs:
             --annotations git-sha=${{ env.IMAGE_TAG }} \
             --annotations workflow-run=${{ github.run_id }} \
             --annotations github-ref=${{ github.ref }} \
-            ${{ needs.build-and-push-images.outputs.frontend_image_name }} || echo "Cosign frontend signing failed, continuing..."
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
 
       - name: Verify backend image signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
@@ -1405,7 +1426,7 @@ jobs:
           cosign verify \
             ${{ needs.build-and-push-images.outputs.backend_image_name }} \
             --certificate-identity-regexp='.*' \
-            --certificate-oidc-issuer-regexp='.*' || echo "Cosign backend verification failed, continuing..."
+            --certificate-oidc-issuer-regexp='.*'
 
       - name: Verify frontend image signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
@@ -1413,7 +1434,7 @@ jobs:
           cosign verify \
             ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
             --certificate-identity-regexp='.*' \
-            --certificate-oidc-issuer-regexp='.*' || echo "Cosign frontend verification failed, continuing..."
+            --certificate-oidc-issuer-regexp='.*'
 
       - name: Upload release SBOMs
         if: always() && inputs.enable_sbom_generation
@@ -1572,6 +1593,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect, build-and-push-images, image-security-scan]
+    if: needs.detect.outputs.build_any_image == 'true'
     permissions:
       contents: read
 
@@ -1604,7 +1626,7 @@ jobs:
           echo "Starting backend container for smoke test..."
           docker run -d --rm --name backend-smoke-test \
             -p 8088:8088 \
-            ${{ needs.build-and-push-images.outputs.backend_image_name }} || echo "Failed to start backend container"
+            ${{ needs.build-and-push-images.outputs.backend_image_name }}
           
           echo "Waiting for backend to start (max 60 seconds)..."
           for i in {1..30}; do
@@ -1622,7 +1644,7 @@ jobs:
             sleep 2
           done
           
-          echo "Backend health check failed after 60 seconds"
+          echo "::error::Backend health check failed after 60 seconds"
           echo "Container logs:"
           docker logs backend-smoke-test 2>/dev/null || echo "Could not get container logs"
           docker stop backend-smoke-test 2>/dev/null || true
@@ -1636,7 +1658,7 @@ jobs:
           echo "Starting frontend container for smoke test..."
           docker run -d --rm --name frontend-smoke-test \
             -p 8080:80 \
-            ${{ needs.build-and-push-images.outputs.frontend_image_name }} || echo "Failed to start frontend container"
+            ${{ needs.build-and-push-images.outputs.frontend_image_name }}
           
           echo "Waiting for frontend to start (max 60 seconds)..."
           for i in {1..30}; do
@@ -1654,7 +1676,7 @@ jobs:
             sleep 2
           done
           
-          echo "Frontend accessibility check failed after 60 seconds"
+          echo "::error::Frontend accessibility check failed after 60 seconds"
           echo "Container logs:"
           docker logs frontend-smoke-test 2>/dev/null || echo "Could not get container logs"
           docker stop frontend-smoke-test 2>/dev/null || true
@@ -1669,7 +1691,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [detect, build-and-push-images, image-security-scan, smoke-test]
-    if: inputs.promote_to_latest == true && github.ref_name == 'main'
+    if: inputs.promote_to_latest == true && github.ref_name == 'main' && needs.detect.outputs.build_any_image == 'true'
     permissions:
       contents: read
       packages: write
@@ -1699,30 +1721,30 @@ jobs:
         if: needs.detect.outputs.build_backend_image == 'true'
         run: |
           echo "Promoting backend image to latest tag..."
-          docker pull ${{ needs.build-and-push-images.outputs.backend_image_name }} || echo "Failed to pull backend image"
-
+          docker pull ${{ needs.build-and-push-images.outputs.backend_image_name }}
+          
           IMAGE_NAME="${{ needs.build-and-push-images.outputs.backend_image_name }}"
           LATEST_NAME="${IMAGE_NAME%:*}:latest"
           
-          docker tag ${{ needs.build-and-push-images.outputs.backend_image_name }} "$LATEST_NAME" || echo "Failed to tag backend image"
-          docker push "$LATEST_NAME" || echo "Failed to push backend latest tag"
+          docker tag ${{ needs.build-and-push-images.outputs.backend_image_name }} "$LATEST_NAME"
+          docker push "$LATEST_NAME"
           
-          docker pull "$LATEST_NAME" || echo "Failed to pull latest backend image"
+          docker pull "$LATEST_NAME"
           echo "Backend promoted to latest tag"
 
       - name: Promote frontend to latest
         if: needs.detect.outputs.build_frontend_image == 'true'
         run: |
           echo "Promoting frontend image to latest tag..."
-          docker pull ${{ needs.build-and-push-images.outputs.frontend_image_name }} || echo "Failed to pull frontend image"
-
+          docker pull ${{ needs.build-and-push-images.outputs.frontend_image_name }}
+          
           IMAGE_NAME="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
           LATEST_NAME="${IMAGE_NAME%:*}:latest"
           
-          docker tag ${{ needs.build-and-push-images.outputs.frontend_image_name }} "$LATEST_NAME" || echo "Failed to tag frontend image"
-          docker push "$LATEST_NAME" || echo "Failed to push frontend latest tag"
+          docker tag ${{ needs.build-and-push-images.outputs.frontend_image_name }} "$LATEST_NAME"
+          docker push "$LATEST_NAME"
           
-          docker pull "$LATEST_NAME" || echo "Failed to pull latest frontend image"
+          docker pull "$LATEST_NAME"
           echo "Frontend promoted to latest tag"
 
       - name: Sign latest tags with Cosign
@@ -1737,7 +1759,7 @@ jobs:
             cosign sign --yes \
               --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
               --annotations original-sha=${{ env.IMAGE_TAG }} \
-              "$LATEST_NAME" || echo "Failed to sign backend latest tag"
+              "$LATEST_NAME"
           fi
           
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
@@ -1747,7 +1769,7 @@ jobs:
             cosign sign --yes \
               --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
               --annotations original-sha=${{ env.IMAGE_TAG }} \
-              "$LATEST_NAME" || echo "Failed to sign frontend latest tag"
+              "$LATEST_NAME"
           fi
 
   release-summary:
