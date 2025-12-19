@@ -1,5 +1,3 @@
-name: App Release DevSecOps
-
 on:
   workflow_call:
     inputs:
@@ -104,7 +102,6 @@ on:
       SOCKET_CLI_API_TOKEN:
         required: false
 
-
 env:
   TRIVY_VERSION: '0.68.2'
   SYFT_VERSION: 'v1.38.2'
@@ -122,9 +119,14 @@ env:
   TRIVY_SEVERITY: 'CRITICAL,HIGH'
   GRYPE_FAIL_SEVERITY: 'high'
   DOCKLE_SEVERITY: 'FATAL'
-  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE != '' && vars.DOCKERHUB_NAMESPACE || github.repository_owner }}
+
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE != '' && vars.DOCKERHUB_NAMESPACE || vars.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
   SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
+  SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
+
   COSIGN_EXPERIMENTAL: 'true'
   DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
   DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
@@ -202,7 +204,7 @@ jobs:
                 break
               fi
             done
-            
+
             if [ "$build_backend_image" = "false" ] && [ -f "Dockerfile" ] && [ "$has_frontend" = "false" ]; then
               build_backend_image=true
               backend_image_context="."
@@ -223,7 +225,7 @@ jobs:
                 break
               fi
             done
-            
+
             if [ "$build_frontend_image" = "false" ] && [ -f "Dockerfile" ] && [ "$has_backend" = "false" ]; then
               build_frontend_image=true
               frontend_image_context="."
@@ -288,7 +290,7 @@ jobs:
         run: |
           set -e
           echo "Running comprehensive Semgrep SAST scan for production..."
-          
+
           if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
             echo "Using Semgrep App with configured policies..."
             semgrep ci --sarif --output semgrep-release.sarif
@@ -296,7 +298,7 @@ jobs:
             echo "Using local security-audit rules..."
             semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif
           fi
-          
+
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
           if not os.path.exists("semgrep-release.sarif"):
@@ -311,9 +313,9 @@ jobs:
             count=len(results)
             print("sarif_exists=true")
             print(f"finding_count={count}")
-          except Exception as e:
+          except Exception:
             print("sarif_exists=false")
-            print(f"finding_count=0")
+            print("finding_count=0")
           PY
 
       - name: Setup Trivy
@@ -352,12 +354,12 @@ jobs:
               count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
               print("sarif_exists=true")
               print(f"vuln_count={count}")
-            except Exception as e:
+            except Exception:
               print("sarif_exists=false")
-              print(f"vuln_count=0")
+              print("vuln_count=0")
           else:
             print("sarif_exists=false")
-            print(f"vuln_count=0")
+            print("vuln_count=0")
           PY
 
       - name: Trivy secret scan
@@ -386,12 +388,12 @@ jobs:
               count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
               print("secret_sarif_exists=true")
               print(f"secret_count={count}")
-            except Exception as e:
+            except Exception:
               print("secret_sarif_exists=false")
-              print(f"secret_count=0")
+              print("secret_count=0")
           else:
             print("secret_sarif_exists=false")
-            print(f"secret_count=0")
+            print("secret_count=0")
           PY
 
       - name: Gitleaks secrets scan
@@ -509,10 +511,10 @@ jobs:
               print(f"high={high}")
               print(f"critical={critical}")
               print(f"high_critical_total={high+critical}")
-          except Exception as e:
-            print(f"high=0")
-            print(f"critical=0")
-            print(f"high_critical_total=0")
+          except Exception:
+            print("high=0")
+            print("critical=0")
+            print("high_critical_total=0")
           PY
 
       - name: Socket.dev supply chain protection
@@ -520,13 +522,15 @@ jobs:
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          SOCKET_CLI_API_TOKEN: ${{ env.SOCKET_CLI_API_TOKEN }}
+          SOCKET_SECURITY_API_TOKEN: ${{ env.SOCKET_CLI_API_TOKEN }}
         run: |
           npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
 
       - name: Socket.dev skipped
         if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.SOCKET_CLI_API_TOKEN == ''
         run: |
-          echo "::warning::Socket.dev is enabled but SOCKET_CLI_API_TOKEN is not set. Add secrets.SOCKET_CLI_API_TOKEN or disable inputs.enable_socket."
+          echo "::warning::Socket.dev is enabled but SOCKET_CLI_API_TOKEN is not set. Add secrets.SOCKET_CLI_API_TOKEN (and pass it to the reusable workflow) or disable inputs.enable_socket."
 
       - name: Install Snyk CLI
         if: inputs.enable_snyk
@@ -719,7 +723,7 @@ jobs:
               echo "::error::Snyk backend scan found HIGH+ severity vulnerabilities"
               failures=1
             fi
-            
+
             if [ "${HAS_FRONTEND}" = "true" ] && [ "${SNYK_FRONTEND_OUTCOME}" = "failure" ]; then
               echo "::error::Snyk frontend scan found HIGH+ severity vulnerabilities"
               failures=1
@@ -774,7 +778,7 @@ jobs:
         run: |
           set -e
           banned_found=false
-          
+
           if [ -f "pom.xml" ]; then
             mvn -B -ntp license:add-third-party \
               -Dlicense.excludedScopes=test,provided \
@@ -798,7 +802,7 @@ jobs:
           else
             echo "::warning::No license file generated at target/generated-sources/license/THIRD-PARTY.txt"
           fi
-          
+
           echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
 
       - name: npm license report
@@ -809,7 +813,7 @@ jobs:
           set -euo pipefail
           npm install -g license-checker@${{ env.LICENSE_CHECKER_VERSION }}
           npm ci --prefer-offline --no-audit --no-fund
-          
+
           if command -v license-checker &> /dev/null; then
             license-checker --json --out licenses.json 2>/dev/null || true
           else
@@ -817,36 +821,36 @@ jobs:
             echo "banned_count=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           if [ ! -f "licenses.json" ]; then
             echo "No licenses.json generated"
             echo "banned_count=0" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
+
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os, sys
-          
+
           banned=os.environ.get("BANNED_LICENSE_TOKENS","").split(",")
           banned=[b.strip() for b in banned if b.strip()]
-          
+
           try:
             with open("licenses.json", "r", encoding="utf-8") as f:
               data=json.load(f)
-          except Exception as e:
+          except Exception:
             print("banned_count=0")
             sys.exit(0)
-          
+
           bad=[]
           for pkg, info in data.items():
             lic=info.get("licenses","")
             s=";".join(lic) if isinstance(lic,list) else str(lic)
             if any(tok.lower() in s.lower() for tok in banned):
               bad.append((pkg,s))
-          
+
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
             f.write(f"banned_count={len(bad)}\n")
-          
+
           if bad:
             print("License compliance violations found:")
             for pkg,s in bad[:50]:
@@ -874,17 +878,17 @@ jobs:
           NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
         run: |
           failures=0
-          
+
           if [ "${MAVEN_BANNED}" = "true" ]; then
             echo "::error::Maven dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS})"
             failures=1
           fi
-          
+
           if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
             echo "::error::NPM dependencies contain banned license tokens (${BANNED_LICENSE_TOKENS}); count=${NPM_BANNED_COUNT}"
             failures=1
           fi
-          
+
           if [ "$failures" -ne 0 ]; then
             echo "::error::License compliance check failed."
             exit 1
@@ -951,7 +955,6 @@ jobs:
           sarif_file: scorecard.sarif
           category: scorecard-release
 
-
   build-and-push-images:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -996,15 +999,15 @@ jobs:
           REGISTRY="ghcr.io"
           NAMESPACE="${{ github.repository_owner }}"
 
-          if [ -n "${{ env.DOCKERHUB_TOKEN }}" ] && [ "${{ env.DOCKERHUB_TOKEN }}" != "" ]; then
+          if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USERNAME:-}" ]; then
             REGISTRY="docker.io"
-            NAMESPACE="${{ env.DOCKERHUB_NAMESPACE }}"
+            NAMESPACE="${DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}"
           fi
 
           {
             echo "registry=${REGISTRY}"
-            echo "backend_image_name=${REGISTRY}/${NAMESPACE}/backend:${{ env.IMAGE_TAG }}"
-            echo "frontend_image_name=${REGISTRY}/${NAMESPACE}/frontend:${{ env.IMAGE_TAG }}"
+            echo "backend_image_name=${REGISTRY}/${NAMESPACE}/backend:${IMAGE_TAG}"
+            echo "frontend_image_name=${REGISTRY}/${NAMESPACE}/frontend:${IMAGE_TAG}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -1015,14 +1018,14 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_NAMESPACE }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1046,7 +1049,6 @@ jobs:
           sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
           labels: |
             org.opencontainers.image.version=${{ env.IMAGE_TAG }}
-            org.opencontainers.image.created=${{ fromJSON('{}').job_started_at || 'unknown' }}
             org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
 
       - name: Build and push frontend image
@@ -1066,7 +1068,6 @@ jobs:
           sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
           labels: |
             org.opencontainers.image.version=${{ env.IMAGE_TAG }}
-            org.opencontainers.image.created=${{ fromJSON('{}').job_started_at || 'unknown' }}
             org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
 
       - name: Log image digests
@@ -1128,7 +1129,6 @@ jobs:
           sudo install -m 0755 /tmp/dockle /usr/local/bin/dockle
           dockle --version
 
-
       - name: Install Dive
         if: inputs.enable_dive
         run: |
@@ -1138,14 +1138,14 @@ jobs:
           dive --version
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_NAMESPACE }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1652,14 +1652,14 @@ jobs:
           egress-policy: audit
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_NAMESPACE }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1751,14 +1751,14 @@ jobs:
           egress-policy: audit
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_NAMESPACE }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
