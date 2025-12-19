@@ -88,6 +88,22 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      DOCKERHUB_TOKEN:
+        required: false
+      DEPENDENCY_TRACK_URL:
+        required: false
+      DEPENDENCY_TRACK_API_KEY:
+        required: false
+      SEMGREP_APP_TOKEN:
+        required: false
+      SNYK_TOKEN:
+        required: false
+      NVD_API_KEY:
+        required: false
+      SOCKET_CLI_API_TOKEN:
+        required: false
+
 
 env:
   TRIVY_VERSION: '0.68.2'
@@ -106,8 +122,9 @@ env:
   TRIVY_SEVERITY: 'CRITICAL,HIGH'
   GRYPE_FAIL_SEVERITY: 'high'
   DOCKLE_SEVERITY: 'FATAL'
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE != '' && vars.DOCKERHUB_NAMESPACE || github.repository_owner }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
   COSIGN_EXPERIMENTAL: 'true'
   DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
   DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
@@ -499,13 +516,17 @@ jobs:
           PY
 
       - name: Socket.dev supply chain protection
-        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true'
+        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.SOCKET_CLI_API_TOKEN != ''
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         env:
-          SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-            npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
+          npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
+
+      - name: Socket.dev skipped
+        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.SOCKET_CLI_API_TOKEN == ''
+        run: |
+          echo "::warning::Socket.dev is enabled but SOCKET_CLI_API_TOKEN is not set. Add secrets.SOCKET_CLI_API_TOKEN or disable inputs.enable_socket."
 
       - name: Install Snyk CLI
         if: inputs.enable_snyk
@@ -970,15 +991,20 @@ jobs:
 
       - name: Set image names
         id: set-images
+        shell: bash
         run: |
-          REPO_NAME="${{ github.repository_owner }}"
-          if [ -n "${{ env.DOCKERHUB_USERNAME }}" ] && [ "${{ env.DOCKERHUB_USERNAME }}" != "" ]; then
-            REPO_NAME="${{ env.DOCKERHUB_USERNAME }}"
+          REGISTRY="ghcr.io"
+          NAMESPACE="${{ github.repository_owner }}"
+
+          if [ -n "${{ env.DOCKERHUB_TOKEN }}" ] && [ "${{ env.DOCKERHUB_TOKEN }}" != "" ]; then
+            REGISTRY="docker.io"
+            NAMESPACE="${{ env.DOCKERHUB_NAMESPACE }}"
           fi
-          
+
           {
-            echo "backend_image_name=${REPO_NAME}/backend:${{ env.IMAGE_TAG }}"
-            echo "frontend_image_name=${REPO_NAME}/frontend:${{ env.IMAGE_TAG }}"
+            echo "registry=${REGISTRY}"
+            echo "backend_image_name=${REGISTRY}/${NAMESPACE}/backend:${{ env.IMAGE_TAG }}"
+            echo "frontend_image_name=${REGISTRY}/${NAMESPACE}/frontend:${{ env.IMAGE_TAG }}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
@@ -989,14 +1015,14 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_NAMESPACE }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_USERNAME == '' || env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1112,14 +1138,14 @@ jobs:
           dive --version
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_NAMESPACE }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_USERNAME == '' || env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1626,14 +1652,14 @@ jobs:
           egress-policy: audit
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_NAMESPACE }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_USERNAME == '' || env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1725,14 +1751,14 @@ jobs:
           egress-policy: audit
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != ''
+        if: env.DOCKERHUB_TOKEN != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
+          username: ${{ env.DOCKERHUB_NAMESPACE }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_USERNAME == '' || env.DOCKERHUB_TOKEN == ''
+        if: env.DOCKERHUB_TOKEN == ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           registry: ghcr.io
@@ -1779,7 +1805,7 @@ jobs:
             LATEST_NAME="${IMAGE_NAME%:*}:latest"
             echo "Signing backend:latest..."
             cosign sign --yes \
-              --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
+              --annotations promoted-timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
               --annotations original-sha=${{ env.IMAGE_TAG }} \
               "$LATEST_NAME"
           fi
@@ -1789,7 +1815,7 @@ jobs:
             LATEST_NAME="${IMAGE_NAME%:*}:latest"
             echo "Signing frontend:latest..."
             cosign sign --yes \
-              --annotations promoted-timestamp=$(date -u +%Y-%m%dT%H:%M:%SZ) \
+              --annotations promoted-timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
               --annotations original-sha=${{ env.IMAGE_TAG }} \
               "$LATEST_NAME"
           fi
@@ -1909,7 +1935,7 @@ jobs:
           fi
           
           if [ "${{ inputs.enable_socket }}" = "true" ]; then
-            if [ -n "${{ secrets.SOCKET_API_TOKEN }}" ]; then
+            if [ -n "${{ env.SOCKET_CLI_API_TOKEN }}" ]; then
               echo "- Supply Chain Protection: Enabled (Socket.dev)" >> consolidated-report.md
             else
               echo "- Supply Chain Protection: Socket.dev token not configured" >> consolidated-report.md
@@ -2034,7 +2060,7 @@ jobs:
           EOF
           fi
           
-          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          cat >> $GITHUB_STEP_SUMMARY <<EOF
 
           ---
           Release pipeline completed on \`${{ github.ref_name }}\` at \`$(date -u +"%Y-%m-%d %H:%M:%S UTC")\`
