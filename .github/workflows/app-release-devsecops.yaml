@@ -1616,6 +1616,13 @@ jobs:
       contents: read
 
     steps:
+      - name: Debug outputs
+        run: |
+          echo "build_backend_image: ${{ needs.detect.outputs.build_backend_image }}"
+          echo "backend_digest: ${{ needs.build-and-push-images.outputs.backend_digest }}"
+          echo "build_frontend_image: ${{ needs.detect.outputs.build_frontend_image }}"
+          echo "frontend_digest: ${{ needs.build-and-push-images.outputs.frontend_digest }}"
+
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
