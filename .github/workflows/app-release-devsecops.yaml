@@ -505,7 +505,7 @@ jobs:
           SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-            npm exec -y @socketsecurity/cli@1.1.49 -- socket ci
+            npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
 
       - name: Install Snyk CLI
         if: inputs.enable_snyk
