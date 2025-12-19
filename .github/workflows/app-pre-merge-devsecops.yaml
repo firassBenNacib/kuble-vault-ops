@@ -1091,7 +1091,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
-    if: github.ref_name == 'main' || github.event_name == 'pull_request'
+    if: github.ref_name == github.event.repository.default_branch || github.event_name == 'pull_request'
     permissions:
       contents: read
       security-events: write

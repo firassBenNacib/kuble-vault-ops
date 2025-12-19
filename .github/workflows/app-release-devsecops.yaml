@@ -873,7 +873,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
-    if: inputs.enable_supply_chain_security
+    if: inputs.enable_supply_chain_security && github.ref_name == github.event.repository.default_branch
     permissions:
       contents: read
       security-events: write
