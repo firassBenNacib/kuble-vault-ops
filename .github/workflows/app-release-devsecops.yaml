@@ -1053,7 +1053,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect, build-and-push-images]
-    if: needs.build-and-push-images.result == 'success'
+    if: |
+      (needs.detect.outputs.build_backend_image == 'true' && needs.build-and-push-images.outputs.backend_digest != '') ||
+      (needs.detect.outputs.build_frontend_image == 'true' && needs.build-and-push-images.outputs.frontend_digest != '')
     permissions:
       contents: read
       security-events: write
