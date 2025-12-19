@@ -935,12 +935,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect, pre-release-security, license-compliance, supply-chain-security]
-    if: |
-      needs.detect.outputs.build_any_image == 'true' &&
-      needs.pre-release-security.result == 'success' &&
-      needs.license-compliance.result == 'success' &&
-      (github.ref_name != github.event.repository.default_branch || 
-      needs.supply-chain-security.result != 'failure')
+    if: >-
+      ${{
+        always()
+        && needs.detect.outputs.build_any_image == 'true'
+        && needs.pre-release-security.result == 'success'
+        && needs.license-compliance.result == 'success'
+        && (
+          github.ref_name != github.event.repository.default_branch
+          || needs.supply-chain-security.result == 'success'
+        )
+      }}
     permissions:
       contents: read
       packages: write
