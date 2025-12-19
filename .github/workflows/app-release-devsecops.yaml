@@ -1080,6 +1080,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     needs: [detect, build-and-push-images]
+    if: >-
+      ${{
+        always()
+        && needs.detect.outputs.build_any_image == 'true'
+        && needs.build-and-push-images.result == 'success'
+      }}
     permissions:
       contents: read
       security-events: write
