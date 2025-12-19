@@ -177,7 +177,7 @@ jobs:
           backend_image_dockerfile=""
 
           if [ "$has_backend" = "true" ]; then
-            for dockerfile in "$backend_dir/Dockerfile" "Dockerfile.backend" "docker/backend/Dockerfile"; do
+            for dockerfile in "$backend_dir/Dockerfile" "Dockerfile" "docker/backend/Dockerfile"; do
               if [ -f "$dockerfile" ]; then
                 build_backend_image=true
                 backend_image_context="$(dirname "$dockerfile")"
@@ -198,7 +198,7 @@ jobs:
           frontend_image_dockerfile=""
 
           if [ "$has_frontend" = "true" ]; then
-            for dockerfile in "$frontend_dir/Dockerfile" "Dockerfile.frontend" "docker/frontend/Dockerfile"; do
+            for dockerfile in "$frontend_dir/Dockerfile" "Dockerfile" "docker/frontend/Dockerfile"; do
               if [ -f "$dockerfile" ]; then
                 build_frontend_image=true
                 frontend_image_context="$(dirname "$dockerfile")"
