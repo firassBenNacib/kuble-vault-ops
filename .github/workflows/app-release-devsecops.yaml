@@ -890,39 +890,46 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
-      - name: Run OpenSSF Scorecard
+      - name: Run OpenSSF Scorecard (JSON)
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard.json
+          results_format: json
+          publish_results: false
+
+      - name: Evaluate Scorecard policy
         run: |
-          echo "Running OpenSSF Scorecard..."
-          curl -sSfL https://raw.githubusercontent.com/ossf/scorecard-action/main/install.sh | sh -s -- -b /usr/local/bin v4.13.0
-          scorecard --repo=${{ github.repository }} --checks=Security-Policy,SAST,Branch-Protection,Code-Review,Dangerous-Workflow,Pinned-Dependencies,Token-Permissions,Vulnerabilities --format=json --show-details > scorecard.json
-          
-          # Check if scorecard passed
           python3 - <<'PY'
-          import json, os
+          import json
           data = json.load(open('scorecard.json'))
           overall_score = data.get('score', 0)
           checks = data.get('checks', [])
-          
           print(f"Overall Scorecard Score: {overall_score}")
-          
           if overall_score < 7.0:
             print("::error::OpenSSF Scorecard score below 7.0 (production threshold)")
-            exit(1)
-            
-          # Check for critical failures
+            raise SystemExit(1)
           critical_checks = ['Security-Policy', 'SAST', 'Branch-Protection', 'Pinned-Dependencies']
           for check in checks:
             if check['name'] in critical_checks and check['score'] < 7:
               print(f"::error::{check['name']} score is {check['score']} (below production threshold)")
-              exit(1)
+              raise SystemExit(1)
           PY
 
+      - name: Run OpenSSF Scorecard (SARIF)
+        if: inputs.enable_code_scanning
+        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a # v2.4.3
+        with:
+          results_file: scorecard.sarif
+          results_format: sarif
+          publish_results: false
+
       - name: Upload Scorecard SARIF to code scanning
-        if: inputs.enable_code_scanning && hashFiles('scorecard.json') != ''
+        if: inputs.enable_code_scanning && hashFiles('scorecard.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
-          sarif_file: scorecard.json
+          sarif_file: scorecard.sarif
           category: scorecard-release
+
 
   build-and-push-images:
     runs-on: ubuntu-latest
