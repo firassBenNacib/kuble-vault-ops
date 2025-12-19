@@ -62,7 +62,7 @@ on:
         description: 'Enable Snyk vulnerability scanning'
         required: false
         type: boolean
-        default: true
+        default: false
       enable_socket:
         description: 'Enable Socket.dev supply chain protection'
         required: false
