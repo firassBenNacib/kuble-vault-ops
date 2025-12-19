@@ -934,8 +934,18 @@ jobs:
   build-and-push-images:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [detect, pre-release-security, license-compliance]
-    if: needs.detect.outputs.build_any_image == 'true'
+    needs: [detect, pre-release-security, license-compliance, supply-chain-security]
+    if: >-
+      ${{
+        always()
+        && needs.detect.outputs.build_any_image == 'true'
+        && needs.pre-release-security.result == 'success'
+        && needs.license-compliance.result == 'success'
+        && (
+          github.ref_name != github.event.repository.default_branch
+          || needs.supply-chain-security.result == 'success'
+        )
+      }}
     permissions:
       contents: read
       packages: write
@@ -1085,8 +1095,14 @@ jobs:
       - name: Install Dockle
         if: inputs.enable_dockle
         run: |
-          curl -sSfL https://raw.githubusercontent.com/goodwithtech/dockle/master/install.sh | sh -s -- -b /usr/local/bin ${{ env.DOCKLE_VERSION }}
+          set -euo pipefail
+          ver="${DOCKLE_VERSION}"
+          curl -fsSL -o /tmp/dockle.tgz \
+            "https://github.com/goodwithtech/dockle/releases/download/v${ver}/dockle_${ver}_Linux-64bit.tar.gz"
+          tar -C /tmp -xzf /tmp/dockle.tgz dockle
+          sudo install -m 0755 /tmp/dockle /usr/local/bin/dockle
           dockle --version
+
 
       - name: Install Dive
         if: inputs.enable_dive
