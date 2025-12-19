@@ -1377,25 +1377,42 @@ jobs:
             print(f"vuln_count=0")
           PY
 
-      - name: Grype scan backend image
-        if: needs.detect.outputs.build_backend_image == 'true'
-        id: grype_backend_image
-        run: |
-          echo "Grype image scan (backend)"
-          grype ${{ needs.build-and-push-images.outputs.backend_image_name }} \
-            --fail-on "${GRYPE_FAIL_SEVERITY}" \
-            -o sarif \
-            --file grype-backend-release.sarif
-
       - name: Grype scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
         id: grype_frontend_image
         run: |
-          echo "Grype image scan (frontend)"
-          grype ${{ needs.build-and-push-images.outputs.frontend_image_name }} \
-            --fail-on "${GRYPE_FAIL_SEVERITY}" \
-            -o sarif \
-            --file grype-frontend-release.sarif
+          set -euo pipefail
+          IMAGE="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
+
+          echo "Grype image scan (frontend) - table output"
+          set +e
+          grype "$IMAGE" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table
+          rc=$?
+          set -e
+
+          echo "Grype image scan (frontend) - SARIF output"
+          grype "$IMAGE" --fail-on never -o sarif --file grype-frontend-release.sarif
+
+          exit $rc
+
+      - name: Grype scan backend image
+        if: needs.detect.outputs.build_backend_image == 'true'
+        id: grype_backend_image
+        run: |
+          set -euo pipefail
+          IMAGE="${{ needs.build-and-push-images.outputs.backend_image_name }}"
+
+          echo "Grype image scan (backend) - table output"
+          set +e
+          grype "$IMAGE" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table
+          rc=$?
+          set -e
+
+          echo "Grype image scan (backend) - SARIF output"
+          grype "$IMAGE" --fail-on never -o sarif --file grype-backend-release.sarif
+
+          exit $rc
+
 
       - name: Dockle scan backend image
         if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
