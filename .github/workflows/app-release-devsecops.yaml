@@ -1391,9 +1391,10 @@ jobs:
           set -e
 
           echo "Grype image scan (frontend) - SARIF output"
-          grype "$IMAGE" --fail-on never -o sarif --file grype-frontend-release.sarif
+          grype "$IMAGE" -o sarif --file grype-frontend-release.sarif || true
 
           exit $rc
+
 
       - name: Grype scan backend image
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -1409,10 +1410,9 @@ jobs:
           set -e
 
           echo "Grype image scan (backend) - SARIF output"
-          grype "$IMAGE" --fail-on never -o sarif --file grype-backend-release.sarif
+          grype "$IMAGE" -o sarif --file grype-backend-release.sarif || true
 
           exit $rc
-
 
       - name: Dockle scan backend image
         if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
