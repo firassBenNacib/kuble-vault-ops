@@ -1,0 +1,30 @@
+{{- if and .Values.networkPolicy.defaultDeny.enabled .Values.networkPolicy.allowDNS.enabled -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "baseline.fullname" . }}-allow-dns
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "baseline.labels" . | nindent 4 }}
+  {{- if .Values.networkPolicy.allowDNS.annotations }}
+  annotations:
+    {{- toYaml .Values.networkPolicy.allowDNS.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- end -}}

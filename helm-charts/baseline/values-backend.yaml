@@ -1,0 +1,47 @@
+resourcePolicy:
+  enabled: false
+  keep:
+    resourceQuota: true
+    limitRange: true
+    networkPolicy: true
+
+resourceQuota:
+  enabled: true
+  hard:
+    requests.cpu: "3"
+    requests.memory: "5Gi"
+    limits.cpu: "6"
+    limits.memory: "8Gi"
+    pods: "12"
+    services: "4"
+    configmaps: "3"
+    secrets: "4"
+    persistentvolumeclaims: "3"
+
+limitRange:
+  enabled: true
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: "250m"
+        memory: "512Mi"
+      default:
+        cpu: "500m"
+        memory: "1Gi"
+      min:
+        cpu: "50m"
+        memory: "128Mi"
+      max:
+        cpu: "2"
+        memory: "4Gi"
+
+networkPolicy:
+  defaultDeny:
+    enabled: true
+    policyTypes:
+      - Ingress
+      - Egress
+    annotations: {}
+  allowDNS:
+    enabled: true
+    annotations: {}
