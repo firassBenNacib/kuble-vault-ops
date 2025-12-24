@@ -1,0 +1,26 @@
+resourcePolicy:
+  enabled: false
+  keep:
+    resourceQuota: true
+    limitRange: true
+    networkPolicy: true
+
+resourceQuota:
+  enabled: false
+  hard: {}
+
+limitRange:
+  enabled: false
+  limits: []
+
+networkPolicy:
+  defaultDeny:
+    enabled: false
+    policyTypes:
+      - Ingress
+      - Egress
+    annotations: {}
+
+  allowDNS:
+    enabled: true
+    annotations: {}

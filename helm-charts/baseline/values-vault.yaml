@@ -1,0 +1,48 @@
+resourcePolicy:
+  enabled: false
+  keep:
+    resourceQuota: true
+    limitRange: true
+    networkPolicy: true
+
+resourceQuota:
+  enabled: true
+  hard:
+    requests.cpu: "3"
+    requests.memory: "6Gi"
+    limits.cpu: "5"
+    limits.memory: "10Gi"
+    pods: "6"
+    services: "3"
+    configmaps: "5"
+    secrets: "5"
+    persistentvolumeclaims: "6"
+
+limitRange:
+  enabled: true
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: "500m"
+        memory: "1Gi"
+      default:
+        cpu: "1"
+        memory: "2Gi"
+      min:
+        cpu: "250m"
+        memory: "512Mi"
+      max:
+        cpu: "2"
+        memory: "4Gi"
+
+networkPolicy:
+  defaultDeny:
+    enabled: true
+    policyTypes:
+      - Ingress
+      - Egress
+    annotations:
+      kube-score/ignore: networkpolicy-targets-pod
+  allowDNS:
+    enabled: true
+    annotations: {}

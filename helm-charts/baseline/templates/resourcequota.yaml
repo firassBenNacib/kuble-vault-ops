@@ -1,0 +1,17 @@
+{{- if .Values.resourceQuota.enabled -}}
+{{- $ns := .Release.Namespace -}}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "baseline.fullname" . }}-quota
+  namespace: {{ $ns | quote }}
+  labels:
+    {{- include "baseline.labels" . | nindent 4 }}
+  {{- if and .Values.resourcePolicy.enabled .Values.resourcePolicy.keep.resourceQuota }}
+  annotations:
+    helm.sh/resource-policy: keep
+  {{- end }}
+spec:
+  hard:
+    {{- toYaml .Values.resourceQuota.hard | nindent 4 }}
+{{- end }}
