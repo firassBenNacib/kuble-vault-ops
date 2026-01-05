@@ -129,7 +129,6 @@ env:
   DOCKLE_SEVERITY: "FATAL"
 
   DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME  }}
-  DOCKERHUB_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || vars.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
   BACKEND_IMAGE_REPO: ${{ vars.BACKEND_IMAGE_REPO }}
@@ -958,7 +957,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
-    if: inputs.enable_supply_chain_security
+    if: inputs.enable_supply_chain_security && github.ref_name == github.event.repository.default_branch
     permissions:
       contents: read
       security-events: write
@@ -1068,7 +1067,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set image names (repo variables + defaults)
+      - name: Set image names
         id: set-images
         shell: bash
         run: |
@@ -1076,9 +1075,12 @@ jobs:
 
           REGISTRY="ghcr.io"
           NAMESPACE="${{ github.repository_owner }}"
+          ENFORCE_USERNAME_NAMESPACE=false
+
           if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USERNAME:-}" ]; then
             REGISTRY="docker.io"
-            NAMESPACE="${DOCKERHUB_NAMESPACE:-$DOCKERHUB_USERNAME}"
+            NAMESPACE="${DOCKERHUB_USERNAME}"
+            ENFORCE_USERNAME_NAMESPACE=true
           fi
 
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
@@ -1088,8 +1090,15 @@ jobs:
             local fallback_name="$2"
             local reg="$3"
             local ns="$4"
+            local enforce_ns="$5"
 
             local v="${input:-$fallback_name}"
+
+            if [ "$enforce_ns" = "true" ]; then
+              v="${v##*/}"
+              echo "${reg}/${ns}/${v}"
+              return
+            fi
 
             if [[ "$v" == *"/"* ]]; then
               local first="${v%%/*}"
@@ -1104,8 +1113,8 @@ jobs:
             fi
           }
 
-          BACKEND_REPO="$(normalize_repo "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend" "${REGISTRY}" "${NAMESPACE}")"
-          FRONTEND_REPO="$(normalize_repo "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend" "${REGISTRY}" "${NAMESPACE}")"
+          BACKEND_REPO="$(normalize_repo "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend" "${REGISTRY}" "${NAMESPACE}" "${ENFORCE_USERNAME_NAMESPACE}")"
+          FRONTEND_REPO="$(normalize_repo "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend" "${REGISTRY}" "${NAMESPACE}" "${ENFORCE_USERNAME_NAMESPACE}")"
 
           echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
           echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
