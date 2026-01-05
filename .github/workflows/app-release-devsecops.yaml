@@ -1079,39 +1079,67 @@ jobs:
             exit 1
           fi
 
-          REGISTRY="docker.io"
-          NAMESPACE="$(echo "${DOCKERHUB_USERNAME}" | tr '[:upper:]' '[:lower:]')"
-
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-
-          normalize_name() {
+          clean() {
             printf '%s' "$1" \
+              | tr -d '\r\n' \
               | tr '[:upper:]' '[:lower:]' \
               | tr -d '[:space:]'
           }
 
-          normalize_repo() {
+          REGISTRY="docker.io"
+          NAMESPACE="$(clean "${DOCKERHUB_USERNAME}")"
+
+          normalize_repo_component() {
             local input="${1:-}"
             local fallback="${2:-}"
             local v="${input:-$fallback}"
 
+            v="$(printf '%s' "$v" | tr -d '\r\n')"
+            v="${v%%@*}"
+            v="${v%%:*}"
             v="${v##*/}"
-            v="$(normalize_name "$v")"
+            v="$(clean "$v")"
 
-            echo "${REGISTRY}/${NAMESPACE}/${v}"
+            if [ -z "$v" ]; then
+              v="$(clean "$fallback")"
+            fi
+
+            v="$(printf '%s' "$v" | tr -cd 'a-z0-9._-')"
+            if [ -z "$v" ]; then
+              echo "::error::Resolved repo component is empty/invalid. Check BACKEND_IMAGE_REPO/FRONTEND_IMAGE_REPO secrets."
+              exit 1
+            fi
+
+            printf '%s' "$v"
           }
 
-          BACKEND_REPO="$(normalize_repo "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend")"
-          FRONTEND_REPO="$(normalize_repo "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend")"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
-          echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
-          echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
+          BACKEND_COMP="$(normalize_repo_component "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend")"
+          FRONTEND_COMP="$(normalize_repo_component "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend")"
 
-          echo "backend_repo=${BACKEND_REPO}" >> "$GITHUB_OUTPUT"
-          echo "frontend_repo=${FRONTEND_REPO}" >> "$GITHUB_OUTPUT"
+          BACKEND_REPO="${REGISTRY}/${NAMESPACE}/${BACKEND_COMP}"
+          FRONTEND_REPO="${REGISTRY}/${NAMESPACE}/${FRONTEND_COMP}"
 
-          echo "backend_image_name=${BACKEND_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-          echo "frontend_image_name=${FRONTEND_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          BACKEND_IMAGE_NAME="${BACKEND_REPO}:${IMAGE_TAG}"
+          FRONTEND_IMAGE_NAME="${FRONTEND_REPO}:${IMAGE_TAG}"
+
+          for x in "$BACKEND_REPO" "$FRONTEND_REPO" "$BACKEND_IMAGE_NAME" "$FRONTEND_IMAGE_NAME"; do
+            if printf '%s' "$x" | grep -q $'[\r\n]'; then
+              echo "::error::Image reference contains CR/LF (newline). Re-save DOCKERHUB_USERNAME/BACKEND_IMAGE_REPO/FRONTEND_IMAGE_REPO secrets without line breaks."
+              exit 1
+            fi
+          done
+
+          {
+            echo "registry=${REGISTRY}"
+            echo "namespace=${NAMESPACE}"
+            echo "backend_repo=${BACKEND_REPO}"
+            echo "frontend_repo=${FRONTEND_REPO}"
+            echo "backend_image_name=${BACKEND_IMAGE_NAME}"
+            echo "frontend_image_name=${FRONTEND_IMAGE_NAME}"
+          } >> "$GITHUB_OUTPUT"
+
 
       - name: Set up QEMU
         if: inputs.enable_multi_arch
