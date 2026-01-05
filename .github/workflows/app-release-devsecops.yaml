@@ -1165,6 +1165,7 @@ jobs:
           push: true
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags:  ${{ steps.set-images.outputs.backend_image_name }}
+          pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: ${{ inputs.enable_slsa_provenance && 'true' || 'false' }}
@@ -1182,8 +1183,8 @@ jobs:
           file: ${{ needs.detect.outputs.frontend_image_dockerfile }}
           push: true
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          tags: |
-            ${{ steps.set-images.outputs.frontend_image_name }}
+          tags: ${{ steps.set-images.outputs.frontend_image_name }}
+          pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: ${{ inputs.enable_slsa_provenance && 'true' || 'false' }}
