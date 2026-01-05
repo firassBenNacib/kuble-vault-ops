@@ -92,7 +92,7 @@ on:
         required: true
         type: string
 
-        
+
     secrets:
       DOCKERHUB_TOKEN:
         required: false
@@ -118,8 +118,8 @@ env:
   SYFT_VERSION: "v1.38.2"
   GRYPE_VERSION: "v0.77.2"
   COSIGN_VERSION: "2.3.0"
-  DOCKLE_VERSION: "0.4.13"
-  DIVE_VERSION: "0.11.0"
+  DOCKLE_VERSION: "0.4.15"
+  DIVE_VERSION: "0.13.1"
   SEMGREP_VERSION: "1.145.0"
   SNYK_VERSION: "1.1301.2"
   LICENSE_CHECKER_VERSION: "25.0.1"
@@ -1382,10 +1382,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
-            docker pull "${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+            docker pull --platform linux/amd64 "${{ needs.build-and-push-images.outputs.backend_image_name }}"
           fi
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
-            docker pull "${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+            docker pull --platform linux/amd64 "${{ needs.build-and-push-images.outputs.frontend_image_name }}"
           fi
 
       - name: Snyk container test (backend)
@@ -1480,18 +1480,20 @@ jobs:
       - name: Dockle scan backend image
         if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
         id: dockle_backend_image
-        continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build-and-push-images.outputs.backend_image_name }}"
           set +e
           dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-backend-report.json "$REF"
           rc=$?
           set -e
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
           if [ -f "dockle-backend-report.json" ]; then
-            jq -r '.[] | "\(.code): \(.title) (Level: \(.level))"' dockle-backend-report.json || true
+            jq -r '.details[]? | "\(.code): \(.title) (Level: \(.level))"' dockle-backend-report.json || true
+            jq -r '.summary? // empty' dockle-backend-report.json || true
           fi
+
           if [ "$rc" -ne 0 ]; then
             echo "::warning::Dockle backend failed threshold (exit=$rc)"
           fi
@@ -1499,35 +1501,38 @@ jobs:
       - name: Dockle scan frontend image
         if: inputs.enable_dockle && needs.detect.outputs.build_frontend_image == 'true'
         id: dockle_frontend_image
-        continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REF="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
           set +e
           dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-frontend-report.json "$REF"
           rc=$?
           set -e
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
           if [ -f "dockle-frontend-report.json" ]; then
-            jq -r '.[] | "\(.code): \(.title) (Level: \(.level))"' dockle-frontend-report.json || true
+            jq -r '.details[]? | "\(.code): \(.title) (Level: \(.level))"' dockle-frontend-report.json || true
+            jq -r '.summary? // empty' dockle-frontend-report.json || true
           fi
+
           if [ "$rc" -ne 0 ]; then
             echo "::warning::Dockle frontend failed threshold (exit=$rc)"
           fi
 
       - name: Dive analysis backend image
         if: inputs.enable_dive && needs.detect.outputs.build_backend_image == 'true'
-        run: |
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
-          CI=true dive "$REF" --ci --lowestEfficiency=0.8
         continue-on-error: true
+        run: |
+          set -euo pipefail
+          REF="${{ needs.build-and-push-images.outputs.backend_image_name }}"
+          CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Dive analysis frontend image
         if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
         run: |
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
-          CI=true dive "$REF" --ci --lowestEfficiency=0.8
-        continue-on-error: true
+          set -euo pipefail
+          REF="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
+          CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Upload release SBOMs
         if: always() && inputs.enable_sbom_generation
@@ -1537,7 +1542,7 @@ jobs:
           path: |
             *-release-sbom.cdx.json
             *-release-sbom.spdx.json
-          retention-days: 365
+          retention-days: 90
           if-no-files-found: ignore
 
       - name: Upload Trivy image SARIFs
