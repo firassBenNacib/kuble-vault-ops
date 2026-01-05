@@ -88,8 +88,11 @@ on:
         required: false
         type: boolean
         default: true
- 
+      expected_signing_identity:
+        required: true
+        type: string
 
+        
     secrets:
       DOCKERHUB_TOKEN:
         required: false
@@ -1713,7 +1716,7 @@ jobs:
           printf 'Expected identity: %q\n' "$IDENTITY"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "$IDENTITY" \
+            --certificate-identity "${{ inputs.expected_signing_identity }}" \
             >/dev/null
 
       - name: Verify frontend signature
@@ -1728,7 +1731,7 @@ jobs:
           printf 'Expected identity: %q\n' "$IDENTITY"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "$IDENTITY" \
+            --certificate-identity "${{ inputs.expected_signing_identity }}" \
             >/dev/null
 
   smoke-test:
