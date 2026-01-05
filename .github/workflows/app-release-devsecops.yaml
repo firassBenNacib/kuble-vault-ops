@@ -129,11 +129,11 @@ env:
   GRYPE_FAIL_SEVERITY: "high"
   DOCKLE_SEVERITY: "FATAL"
 
-  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME  }}
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  BACKEND_IMAGE_REPO: ${{ secrets.BACKEND_IMAGE_REPO }}
-  FRONTEND_IMAGE_REPO: ${{ secrets.FRONTEND_IMAGE_REPO }}
+  BACKEND_IMAGE_REPO: ${{ vars.BACKEND_IMAGE_REPO }}
+  FRONTEND_IMAGE_REPO: ${{ vars.FRONTEND_IMAGE_REPO }}
 
   SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
   SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
@@ -1325,7 +1325,7 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
           echo "Frontend SBOM REF=$REF"
           syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
