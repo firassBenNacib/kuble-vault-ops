@@ -88,7 +88,7 @@ on:
         required: false
         type: boolean
         default: true
-      
+ 
 
     secrets:
       DOCKERHUB_TOKEN:
@@ -1714,7 +1714,7 @@ jobs:
 
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github\\.com/${WF_REF}$" \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/app-release-devsecops\\.yaml@refs/(heads|tags)/.+$" \
             >/dev/null
 
       - name: Verify frontend signature
@@ -1730,7 +1730,7 @@ jobs:
 
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github\\.com/${WF_REF}$" \
+            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/app-release-devsecops\\.yaml@refs/(heads|tags)/.+$" \
             >/dev/null
 
 
