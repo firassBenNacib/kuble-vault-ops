@@ -1311,28 +1311,23 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Generate backend SBOM with Syft
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
         run: |
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
-          syft "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
-          syft "$REF" -o spdx-json=backend-release-sbom.spdx.json
-
+          set -euo pipefail
+          REF="${{ needs.build-and-push-images.outputs.backend_digest_ref }}"
+          echo "Backend SBOM REF=$REF"
+          syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
+          syft --from registry "$REF" -o spdx-json=backend-release-sbom.spdx.json
 
       - name: Generate frontend SBOM with Syft
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
-          syft "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
-          syft "$REF" -o spdx-json=frontend-release-sbom.spdx.json
+          set -euo pipefail
+          REF="${{ needs.build-and-push-images.outputs.frontend_digest_ref }}"
+          echo "Frontend SBOM REF=$REF"
+          syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
+          syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
 
       - name: Validate SBOM quality
         if: inputs.enable_sbom_generation
@@ -1763,14 +1758,6 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Backend smoke test
         if: needs.detect.outputs.build_backend_image == 'true'
         run: |
@@ -1835,15 +1822,7 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Promote backend to latest (digest-safe)
+      - name: Promote backend to latest 
         if: needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
