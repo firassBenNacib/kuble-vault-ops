@@ -88,6 +88,7 @@ on:
         required: false
         type: boolean
         default: true
+      
 
     secrets:
       DOCKERHUB_TOKEN:
@@ -128,11 +129,11 @@ env:
   GRYPE_FAIL_SEVERITY: "high"
   DOCKLE_SEVERITY: "FATAL"
 
-  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME  }}
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME  }}
   DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
 
-  BACKEND_IMAGE_REPO: ${{ vars.BACKEND_IMAGE_REPO }}
-  FRONTEND_IMAGE_REPO: ${{ vars.FRONTEND_IMAGE_REPO }}
+  BACKEND_IMAGE_REPO: ${{ secrets.BACKEND_IMAGE_REPO }}
+  FRONTEND_IMAGE_REPO: ${{ secrets.FRONTEND_IMAGE_REPO }}
 
   SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
   SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
@@ -1073,48 +1074,35 @@ jobs:
         run: |
           set -euo pipefail
 
-          REGISTRY="ghcr.io"
-          NAMESPACE="${{ github.repository_owner }}"
-          ENFORCE_USERNAME_NAMESPACE=false
-
-          if [ -n "${DOCKERHUB_TOKEN:-}" ] && [ -n "${DOCKERHUB_USERNAME:-}" ]; then
-            REGISTRY="docker.io"
-            NAMESPACE="${DOCKERHUB_USERNAME}"
-            ENFORCE_USERNAME_NAMESPACE=true
+          if [ -z "${DOCKERHUB_USERNAME:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+            echo "::error::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN must be set (Docker Hub only mode)."
+            exit 1
           fi
+
+          REGISTRY="docker.io"
+          NAMESPACE="$(echo "${DOCKERHUB_USERNAME}" | tr '[:upper:]' '[:lower:]')"
 
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
-          normalize_repo() {
-            local input="${1:-}"
-            local fallback_name="$2"
-            local reg="$3"
-            local ns="$4"
-            local enforce_ns="$5"
-
-            local v="${input:-$fallback_name}"
-
-            if [ "$enforce_ns" = "true" ]; then
-              v="${v##*/}"
-              echo "${reg}/${ns}/${v}"
-              return
-            fi
-
-            if [[ "$v" == *"/"* ]]; then
-              local first="${v%%/*}"
-
-              if [[ "$first" == *"."* || "$first" == *":"* || "$first" == "localhost" ]]; then
-                echo "$v"
-              else
-                echo "${reg}/${v}"
-              fi
-            else
-              echo "${reg}/${ns}/${v}"
-            fi
+          normalize_name() {
+            printf '%s' "$1" \
+              | tr '[:upper:]' '[:lower:]' \
+              | tr -d '[:space:]'
           }
 
-          BACKEND_REPO="$(normalize_repo "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend" "${REGISTRY}" "${NAMESPACE}" "${ENFORCE_USERNAME_NAMESPACE}")"
-          FRONTEND_REPO="$(normalize_repo "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend" "${REGISTRY}" "${NAMESPACE}" "${ENFORCE_USERNAME_NAMESPACE}")"
+          normalize_repo() {
+            local input="${1:-}"
+            local fallback="${2:-}"
+            local v="${input:-$fallback}"
+
+            v="${v##*/}"
+            v="$(normalize_name "$v")"
+
+            echo "${REGISTRY}/${NAMESPACE}/${v}"
+          }
+
+          BACKEND_REPO="$(normalize_repo "${BACKEND_IMAGE_REPO:-}" "${REPO_NAME}-backend")"
+          FRONTEND_REPO="$(normalize_repo "${FRONTEND_IMAGE_REPO:-}" "${REPO_NAME}-frontend")"
 
           echo "registry=${REGISTRY}" >> "$GITHUB_OUTPUT"
           echo "namespace=${NAMESPACE}" >> "$GITHUB_OUTPUT"
@@ -1124,9 +1112,6 @@ jobs:
 
           echo "backend_image_name=${BACKEND_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
           echo "frontend_image_name=${FRONTEND_REPO}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
-
-          echo "backend_digest_ref=" >> "$GITHUB_OUTPUT"
-          echo "frontend_digest_ref=" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         if: inputs.enable_multi_arch
@@ -1142,14 +1127,6 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Log in to GitHub Container Registry
-        if: env.DOCKERHUB_TOKEN == '' || env.DOCKERHUB_USERNAME == ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Build and push backend image
         id: backend-build
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -1159,8 +1136,7 @@ jobs:
           file: ${{ needs.detect.outputs.backend_image_dockerfile }}
           push: true
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          tags: |
-            ${{ steps.set-images.outputs.backend_image_name }}
+          tags:  ${{ steps.set-images.outputs.backend_image_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: ${{ inputs.enable_slsa_provenance && 'true' || 'false' }}
