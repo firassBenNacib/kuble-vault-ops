@@ -1707,14 +1707,9 @@ jobs:
           set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
 
-          WF_REF="$GITHUB_WORKFLOW_REF"
-          WF_REF="${WF_REF//\\/\\\\}"
-          WF_REF="${WF_REF//./\\.}"
-          WF_REF="${WF_REF//\//\\/}"
-
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/app-release-devsecops\\.yaml@refs/(heads|tags)/.+$" \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
             >/dev/null
 
       - name: Verify frontend signature
@@ -1723,17 +1718,12 @@ jobs:
           set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
 
-          WF_REF="$GITHUB_WORKFLOW_REF"
-          WF_REF="${WF_REF//\\/\\\\}"
-          WF_REF="${WF_REF//./\\.}"
-          WF_REF="${WF_REF//\//\\/}"
-
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity-regexp "^https://github\\.com/${GITHUB_REPOSITORY}/\\.github/workflows/app-release-devsecops\\.yaml@refs/(heads|tags)/.+$" \
+            --certificate-identity "https://github.com/${GITHUB_WORKFLOW_REF}" \
             >/dev/null
 
-
+            
   smoke-test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
