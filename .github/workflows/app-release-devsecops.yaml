@@ -1703,26 +1703,32 @@ jobs:
 
       - name: Verify backend signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
-        env:
-          EXPECTED_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/app-release-devsecops.yaml@${{ github.ref }}
+        shell: bash
         run: |
           set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+
+          IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          printf 'Expected identity: %q\n' "$IDENTITY"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "${EXPECTED_IDENTITY}" \
+            --certificate-identity "$IDENTITY" \
             >/dev/null
 
       - name: Verify frontend signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
-        env:
-          EXPECTED_IDENTITY: ${{ github.server_url }}/${{ github.repository }}/.github/workflows/app-release-devsecops.yaml@${{ github.ref }}
+        shell: bash
         run: |
           set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+
+          IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
+
+          printf 'Expected identity: %q\n' "$IDENTITY"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "${EXPECTED_IDENTITY}" \
+            --certificate-identity "$IDENTITY" \
             >/dev/null
 
   smoke-test:
