@@ -1315,8 +1315,9 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_digest_ref }}"
+          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
           echo "Backend SBOM REF=$REF"
+          [ -n "$REF" ] || { echo "::error::Backend image reference is empty"; exit 1; }
           syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=backend-release-sbom.spdx.json
 
@@ -1324,7 +1325,7 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_digest_ref }}"
+          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
           echo "Frontend SBOM REF=$REF"
           syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
