@@ -1792,14 +1792,6 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Debug smoke-test gate values
-        if: always()
-        run: |
-          echo "run_smoke_test='${{ inputs.run_smoke_test }}'"
-          echo "build_any_image='${{ needs.detect.outputs.build_any_image }}'"
-          echo "build_and_push_images.result='${{ needs.build_and_push_images.result }}'"
-          echo "image_security_scan.result='${{ needs.image_security_scan.result }}'"
-
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
@@ -1812,6 +1804,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          NAME="backend-smoke-test"
           REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
           [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
 
@@ -1821,18 +1814,39 @@ jobs:
           RETRIES="${{ inputs.smoke_test_retries }}"
 
           docker pull --platform linux/amd64 "$REF"
-          docker run -d --rm --name backend-smoke-test -p "${HOST_PORT}:${CONTAINER_PORT}" "$REF"
+
+          docker run -d --name "$NAME" -p "127.0.0.1:${HOST_PORT}:${CONTAINER_PORT}" "$REF"
+
+          sleep 2
 
           for i in $(seq 1 "${RETRIES}"); do
-            if curl -fsS "http://localhost:${HOST_PORT}${HEALTH_PATH}" >/dev/null 2>&1; then
-              docker stop backend-smoke-test >/dev/null 2>&1 || true
+            if ! docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
+              echo "::error::Container exited before becoming healthy."
+              echo "docker ps -a:"
+              docker ps -a
+              echo "logs:"
+              docker logs "$NAME" || true
+              echo "inspect (exit code):"
+              docker inspect "$NAME" --format 'status={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' || true
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
+              exit 1
+            fi
+
+            # Check HTTP status (don’t hide useful info)
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}${HEALTH_PATH}" || true)"
+            if [ "$code" = "200" ]; then
+              docker rm -f "$NAME" >/dev/null 2>&1 || true
               exit 0
             fi
+
+            echo "Attempt $i/$RETRIES: HTTP $code"
             sleep 2
           done
 
-          docker logs backend-smoke-test || true
-          docker stop backend-smoke-test >/dev/null 2>&1 || true
+          echo "::error::Health endpoint never became ready."
+          docker logs "$NAME" || true
+          docker inspect "$NAME" --format 'status={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' || true
+          docker rm -f "$NAME" >/dev/null 2>&1 || true
           exit 1
 
       - name: Frontend smoke test
