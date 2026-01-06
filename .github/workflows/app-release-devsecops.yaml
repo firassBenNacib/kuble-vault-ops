@@ -930,20 +930,28 @@ jobs:
         if: needs.detect.outputs.has_backend == 'true'
         id: maven_license
         working-directory: ${{ needs.detect.outputs.backend_dir }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
+
           banned_found=false
+          report_generated=false
+          mvn_rc=0
 
           if [ -f "pom.xml" ]; then
+            set +e
             mvn -B -ntp license:add-third-party \
               -Dlicense.excludedScopes=test,provided \
               -Dlicense.outputDirectory=target/generated-sources/license \
               -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
-              -Dskip=false 2>&1 | grep -v "Parameter 'skip' is unknown" || true
+              2>&1 | sed "/Parameter 'skip' is unknown/d"
+            mvn_rc=${PIPESTATUS[0]}
+            set -e
           fi
 
-          if [ -f "target/generated-sources/license/THIRD-PARTY.txt" ]; then
-            LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
+          LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
+          if [ -f "$LIC_FILE" ]; then
+            report_generated=true
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
               if grep -iq "$token" "$LIC_FILE"; then
@@ -952,10 +960,14 @@ jobs:
               fi
             done
           else
-            echo "::warning::No THIRD-PARTY.txt generated"
+            echo "::error::No THIRD-PARTY.txt generated (cannot validate Maven licenses)"
           fi
 
-          echo "banned_found=$banned_found" >> "$GITHUB_OUTPUT"
+          {
+            echo "mvn_rc=$mvn_rc"
+            echo "report_generated=$report_generated"
+            echo "banned_found=$banned_found"
+          } >> "$GITHUB_OUTPUT"
 
       - name: npm license report
         if: needs.detect.outputs.has_frontend == 'true'
@@ -999,18 +1011,33 @@ jobs:
       - name: Evaluate license compliance
         if: always() && inputs.enforce_policies
         env:
+          MAVEN_RC: ${{ steps.maven_license.outputs.mvn_rc }}
+          MAVEN_REPORT: ${{ steps.maven_license.outputs.report_generated }}
           MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
           NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
         run: |
           failures=0
+
+          if [ "${MAVEN_RC:-0}" -ne 0 ]; then
+            echo "::error::Maven license report generation failed (exit=${MAVEN_RC})"
+            failures=1
+          fi
+
+          if [ "${MAVEN_REPORT}" != "true" ]; then
+            echo "::error::Missing THIRD-PARTY.txt (treating as policy failure)"
+            failures=1
+          fi
+
           if [ "${MAVEN_BANNED}" = "true" ]; then
             echo "::error::Maven dependencies contain banned licenses"
             failures=1
           fi
+
           if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
             echo "::error::NPM dependencies contain banned licenses; count=${NPM_BANNED_COUNT}"
             failures=1
           fi
+
           if [ "$failures" -ne 0 ]; then exit 1; fi
 
   supply_chain_security:
