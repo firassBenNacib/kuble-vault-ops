@@ -91,11 +91,50 @@ on:
       expected_signing_identity:
         required: true
         type: string
-
+      run_smoke_test:
+        description: "Run container smoke tests after image scanning"
+        required: false
+        type: boolean
+        default: true
+      backend_smoke_host_port:
+        description: "Host port for backend smoke test"
+        required: false
+        type: number
+        default: 8088
+      backend_smoke_container_port:
+        description: "Container port exposed by backend image"
+        required: false
+        type: number
+        default: 8080
+      backend_smoke_health_path:
+        description: "HTTP path to check on backend"
+        required: false
+        type: string
+        default: "/actuator/health"
+      frontend_smoke_host_port:
+        description: "Host port for frontend smoke test"
+        required: false
+        type: number
+        default: 8080
+      frontend_smoke_container_port:
+        description: "Container port exposed by frontend image"
+        required: false
+        type: number
+        default: 80
+      frontend_smoke_path:
+        description: "HTTP path to check on frontend"
+        required: false
+        type: string
+        default: "/"
+      smoke_test_retries:
+        description: "Number of retries  for smoke checks"
+        required: false
+        type: number
+        default: 20
 
     secrets:
       DOCKERHUB_TOKEN:
-        required: false
+        required: true
       DEPENDENCY_TRACK_URL:
         required: false
       DEPENDENCY_TRACK_API_KEY:
@@ -169,7 +208,6 @@ jobs:
       frontend_image_dockerfile: ${{ steps.detect.outputs.frontend_image_dockerfile }}
     permissions:
       contents: read
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -305,7 +343,7 @@ jobs:
             echo "build_any_image=$build_any_image"
           } >> "$GITHUB_OUTPUT"
 
-  pre-release-security:
+  pre_release_security:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [detect]
@@ -313,7 +351,6 @@ jobs:
       contents: read
       security-events: write
       actions: write
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -613,7 +650,6 @@ jobs:
         run: |
           snyk test --severity-threshold=high --sarif-file-output="$GITHUB_WORKSPACE/snyk-frontend.sarif"
 
-
       - name: Upload Semgrep SARIF artifact
         if: steps.semgrep_release.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
@@ -794,17 +830,19 @@ jobs:
               failures=1
             fi
           fi
+
           if [ "${{ inputs.enable_socket }}" = "true" ] && [ -n "${{ env.SOCKET_CLI_API_TOKEN }}" ]; then
             if [ "${SOCKET_OUTCOME}" = "failure" ]; then
               echo "::error::Socket.dev policy failed"
               failures=1
             fi
           fi
+
           if [ "$failures" -ne 0 ]; then
             exit 1
           fi
 
-  license-compliance:
+  license_compliance:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [detect]
@@ -812,7 +850,6 @@ jobs:
     permissions:
       contents: read
       actions: write
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -957,7 +994,7 @@ jobs:
           fi
           if [ "$failures" -ne 0 ]; then exit 1; fi
 
-  supply-chain-security:
+  supply_chain_security:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
@@ -969,8 +1006,6 @@ jobs:
       issues: read
       pull-requests: read
       checks: read
-
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1021,20 +1056,20 @@ jobs:
           sarif_file: scorecard.sarif
           category: scorecard-release
 
-  build-and-push-images:
+  build_and_push_images:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [detect, pre-release-security, license-compliance, supply-chain-security]
+    needs: [detect, pre_release_security, license_compliance, supply_chain_security]
     if: >-
       ${{
         always()
         && needs.detect.outputs.build_any_image == 'true'
-        && needs.pre-release-security.result == 'success'
-        && ( inputs.enable_license_compliance == false || needs.license-compliance.result == 'success' )
+        && needs.pre_release_security.result == 'success'
+        && ( inputs.enable_license_compliance == false || needs.license_compliance.result == 'success' )
         && (
           github.ref_name != github.event.repository.default_branch
           || inputs.enable_supply_chain_security == false
-          || needs.supply-chain-security.result == 'success'
+          || needs.supply_chain_security.result == 'success'
         )
       }}
     permissions:
@@ -1043,23 +1078,17 @@ jobs:
       id-token: write
       attestations: write
       actions: write
-
     outputs:
-      registry: ${{ steps.set-images.outputs.registry }}
-      namespace: ${{ steps.set-images.outputs.namespace }}
-
-      backend_repo: ${{ steps.set-images.outputs.backend_repo }}
-      frontend_repo: ${{ steps.set-images.outputs.frontend_repo }}
-
-      backend_image_name: ${{ steps.set-images.outputs.backend_image_name }}
-      frontend_image_name: ${{ steps.set-images.outputs.frontend_image_name }}
-
-      backend_digest: ${{ steps.backend-build.outputs.digest }}
-      frontend_digest: ${{ steps.frontend-build.outputs.digest }}
-
-      backend_digest_ref: ${{ steps.digest-refs.outputs.backend_digest_ref }}
-      frontend_digest_ref: ${{ steps.digest-refs.outputs.frontend_digest_ref }}
-
+      registry: ${{ steps.set_images.outputs.registry }}
+      namespace: ${{ steps.set_images.outputs.namespace }}
+      backend_repo: ${{ steps.set_images.outputs.backend_repo }}
+      frontend_repo: ${{ steps.set_images.outputs.frontend_repo }}
+      backend_image_name: ${{ steps.set_images.outputs.backend_image_name }}
+      frontend_image_name: ${{ steps.set_images.outputs.frontend_image_name }}
+      backend_digest: ${{ steps.backend_build.outputs.digest }}
+      frontend_digest: ${{ steps.frontend_build.outputs.digest }}
+      backend_digest_ref: ${{ steps.digest_refs.outputs.backend_digest_ref }}
+      frontend_digest_ref: ${{ steps.digest_refs.outputs.frontend_digest_ref }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1072,7 +1101,7 @@ jobs:
           persist-credentials: false
 
       - name: Set image names
-        id: set-images
+        id: set_images
         shell: bash
         run: |
           set -euo pipefail
@@ -1143,7 +1172,6 @@ jobs:
             echo "frontend_image_name=${FRONTEND_IMAGE_NAME}"
           } >> "$GITHUB_OUTPUT"
 
-
       - name: Set up QEMU
         if: inputs.enable_multi_arch
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
@@ -1159,7 +1187,7 @@ jobs:
           password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: Build and push backend image
-        id: backend-build
+        id: backend_build
         if: needs.detect.outputs.build_backend_image == 'true'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
@@ -1167,7 +1195,7 @@ jobs:
           file: ${{ needs.detect.outputs.backend_image_dockerfile }}
           push: true
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          tags:  ${{ steps.set-images.outputs.backend_image_name }}
+          tags: ${{ steps.set_images.outputs.backend_image_name }}
           pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -1178,7 +1206,7 @@ jobs:
             org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
 
       - name: Build and push frontend image
-        id: frontend-build
+        id: frontend_build
         if: needs.detect.outputs.build_frontend_image == 'true'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
@@ -1186,7 +1214,7 @@ jobs:
           file: ${{ needs.detect.outputs.frontend_image_dockerfile }}
           push: true
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
-          tags: ${{ steps.set-images.outputs.frontend_image_name }}
+          tags: ${{ steps.set_images.outputs.frontend_image_name }}
           pull: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -1197,29 +1225,29 @@ jobs:
             org.opencontainers.image.revision=${{ env.IMAGE_TAG }}
 
       - name: Finalize digest refs
-        id: digest-refs
+        id: digest_refs
         if: always()
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ] && [ -n "${{ steps.backend-build.outputs.digest }}" ]; then
-            echo "backend_digest_ref=${{ steps.set-images.outputs.backend_repo }}@${{ steps.backend-build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ] && [ -n "${{ steps.backend_build.outputs.digest }}" ]; then
+            echo "backend_digest_ref=${{ steps.set_images.outputs.backend_repo }}@${{ steps.backend_build.outputs.digest }}" >> "$GITHUB_OUTPUT"
           fi
 
-          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ] && [ -n "${{ steps.frontend-build.outputs.digest }}" ]; then
-            echo "frontend_digest_ref=${{ steps.set-images.outputs.frontend_repo }}@${{ steps.frontend-build.outputs.digest }}" >> "$GITHUB_OUTPUT"
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ] && [ -n "${{ steps.frontend_build.outputs.digest }}" ]; then
+            echo "frontend_digest_ref=${{ steps.set_images.outputs.frontend_repo }}@${{ steps.frontend_build.outputs.digest }}" >> "$GITHUB_OUTPUT"
           fi
 
-  image-security-scan:
+  image_security_scan:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    needs: [detect, build-and-push-images]
+    needs: [detect, build_and_push_images]
     if: >-
       ${{
         always()
         && needs.detect.outputs.build_any_image == 'true'
-        && needs.build-and-push-images.result == 'success'
+        && needs.build_and_push_images.result == 'success'
       }}
     permissions:
       contents: read
@@ -1227,7 +1255,6 @@ jobs:
       id-token: write
       packages: write
       actions: write
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1295,7 +1322,7 @@ jobs:
           sudo apt-get install -y -f ./dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
           rm -f dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
           dive --version
-          
+
       - name: Set up Node.js
         if: inputs.enable_snyk && env.SNYK_TOKEN != ''
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
@@ -1319,7 +1346,7 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
           echo "Backend SBOM REF=$REF"
           [ -n "$REF" ] || { echo "::error::Backend image reference is empty"; exit 1; }
           syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
@@ -1329,7 +1356,7 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
           echo "Frontend SBOM REF=$REF"
           syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
@@ -1382,24 +1409,24 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
-            docker pull --platform linux/amd64 "${{ needs.build-and-push-images.outputs.backend_image_name }}"
+            docker pull --platform linux/amd64 "${{ needs.build_and_push_images.outputs.backend_image_name }}"
           fi
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
-            docker pull --platform linux/amd64 "${{ needs.build-and-push-images.outputs.frontend_image_name }}"
+            docker pull --platform linux/amd64 "${{ needs.build_and_push_images.outputs.frontend_image_name }}"
           fi
 
       - name: Snyk container test (backend)
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_backend_image == 'true'
         id: snyk_container_backend
         run: |
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-backend.sarif
 
       - name: Snyk container test (frontend)
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_frontend_image == 'true'
         id: snyk_container_frontend
         run: |
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-frontend.sarif
 
       - name: Trivy scan backend image
@@ -1407,7 +1434,7 @@ jobs:
         id: trivy_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-backend-release.sarif "$REF"
 
@@ -1432,7 +1459,7 @@ jobs:
         id: trivy_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-frontend-release.sarif "$REF"
 
@@ -1458,7 +1485,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_digest_ref }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
 
           tmp="$(mktemp)"
           set +e
@@ -1479,7 +1506,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_digest_ref }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
 
           tmp="$(mktemp)"
           set +e
@@ -1494,13 +1521,12 @@ jobs:
           grype "$REF" -o sarif --file grype-frontend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
-
       - name: Dockle scan backend image
         if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
         id: dockle_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_image_name }}"
           set +e
           dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-backend-report.json "$REF"
           rc=$?
@@ -1521,7 +1547,7 @@ jobs:
         id: dockle_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_image_name }}"
           set +e
           dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-frontend-report.json "$REF"
           rc=$?
@@ -1542,14 +1568,14 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_image_name }}"
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Dive analysis frontend image
         if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_image_name }}"
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Upload release SBOMs
@@ -1647,16 +1673,12 @@ jobs:
         env:
           BUILD_BACKEND: ${{ needs.detect.outputs.build_backend_image }}
           BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
-
           TRIVY_BACKEND_COUNT: ${{ steps.trivy_backend_image.outputs.vuln_count }}
           TRIVY_FRONTEND_COUNT: ${{ steps.trivy_frontend_image.outputs.vuln_count }}
-
           GRYPE_BACKEND_EXIT: ${{ steps.grype_backend_image.outputs.exit_code }}
           GRYPE_FRONTEND_EXIT: ${{ steps.grype_frontend_image.outputs.exit_code }}
-
           DOCKLE_BACKEND_EXIT: ${{ steps.dockle_backend_image.outputs.exit_code }}
           DOCKLE_FRONTEND_EXIT: ${{ steps.dockle_frontend_image.outputs.exit_code }}
-
           SNYK_CONTAINER_BACKEND_OUTCOME: ${{ steps.snyk_container_backend.outcome }}
           SNYK_CONTAINER_FRONTEND_OUTCOME: ${{ steps.snyk_container_frontend.outcome }}
         run: |
@@ -1672,7 +1694,8 @@ jobs:
             failures=1
           fi
 
-          if [ "${BUILD_BACKEND}" = "true" ] && [ "${GRYPE_BACKEND_EXIT:-0}" -ne 0 ]; then            echo "::error::Grype backend failed policy"
+          if [ "${BUILD_BACKEND}" = "true" ] && [ "${GRYPE_BACKEND_EXIT:-0}" -ne 0 ]; then
+            echo "::error::Grype backend failed policy"
             failures=1
           fi
 
@@ -1708,7 +1731,7 @@ jobs:
       - name: Sign backend image
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
         run: |
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
           cosign sign --yes \
             --annotations build-timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --annotations git-sha="${{ env.IMAGE_TAG }}" \
@@ -1719,7 +1742,7 @@ jobs:
       - name: Sign frontend image
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
         run: |
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
           cosign sign --yes \
             --annotations build-timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --annotations git-sha="${{ env.IMAGE_TAG }}" \
@@ -1732,11 +1755,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.backend_repo }}@${{ needs.build-and-push-images.outputs.backend_digest }}"
-
-          IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
-
-          printf 'Expected identity: %q\n' "$IDENTITY"
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity "${{ inputs.expected_signing_identity }}" \
@@ -1747,28 +1766,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build-and-push-images.outputs.frontend_repo }}@${{ needs.build-and-push-images.outputs.frontend_digest }}"
-
-          IDENTITY="https://github.com/${GITHUB_WORKFLOW_REF}"
-
-          printf 'Expected identity: %q\n' "$IDENTITY"
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity "${{ inputs.expected_signing_identity }}" \
             >/dev/null
 
-  smoke-test:
+  smoke_test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    needs: [detect, build-and-push-images, image-security-scan]
-    if: ${{ always()
-      && needs.detect.outputs.build_any_image == 'true'
-      && needs.build-and-push-images.result == 'success'
-      && needs.image-security-scan.result == 'success'
+    needs: [detect, build_and_push_images, image_security_scan]
+    if: >-
+      ${{
+        inputs.run_smoke_test == true
+        && needs.detect.outputs.build_any_image == 'true'
+        && needs.build_and_push_images.result == 'success'
+        && needs.image_security_scan.result == 'success'
       }}
     permissions:
       contents: read
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1778,9 +1794,10 @@ jobs:
       - name: Debug smoke-test gate values
         if: always()
         run: |
+          echo "run_smoke_test='${{ inputs.run_smoke_test }}'"
           echo "build_any_image='${{ needs.detect.outputs.build_any_image }}'"
-          echo "build-and-push-images.result='${{ needs.build-and-push-images.result }}'"
-          echo "image-security-scan.result='${{ needs.image-security-scan.result }}'"
+          echo "build_and_push_images.result='${{ needs.build_and_push_images.result }}'"
+          echo "image_security_scan.result='${{ needs.image_security_scan.result }}'"
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
@@ -1793,15 +1810,26 @@ jobs:
         if: needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          docker pull "${{ needs.build-and-push-images.outputs.backend_image_name }}"
-          docker run -d --rm --name backend-smoke-test -p 8088:8088 "${{ needs.build-and-push-images.outputs.backend_image_name }}"
-          for i in {1..30}; do
-            if curl -fsS http://localhost:8088/actuator/health >/dev/null 2>&1; then
+
+          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+
+          HOST_PORT="${{ inputs.backend_smoke_host_port }}"
+          CONTAINER_PORT="${{ inputs.backend_smoke_container_port }}"
+          HEALTH_PATH="${{ inputs.backend_smoke_health_path }}"
+          RETRIES="${{ inputs.smoke_test_retries }}"
+
+          docker pull --platform linux/amd64 "$REF"
+          docker run -d --rm --name backend-smoke-test -p "${HOST_PORT}:${CONTAINER_PORT}" "$REF"
+
+          for i in $(seq 1 "${RETRIES}"); do
+            if curl -fsS "http://localhost:${HOST_PORT}${HEALTH_PATH}" >/dev/null 2>&1; then
               docker stop backend-smoke-test >/dev/null 2>&1 || true
               exit 0
             fi
             sleep 2
           done
+
           docker logs backend-smoke-test || true
           docker stop backend-smoke-test >/dev/null 2>&1 || true
           exit 1
@@ -1810,15 +1838,26 @@ jobs:
         if: needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          docker pull "${{ needs.build-and-push-images.outputs.frontend_image_name }}"
-          docker run -d --rm --name frontend-smoke-test -p 8080:80 "${{ needs.build-and-push-images.outputs.frontend_image_name }}"
-          for i in {1..30}; do
-            if curl -fsS http://localhost:8080 >/dev/null 2>&1; then
+
+          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+
+          HOST_PORT="${{ inputs.frontend_smoke_host_port }}"
+          CONTAINER_PORT="${{ inputs.frontend_smoke_container_port }}"
+          PATH_TO_CHECK="${{ inputs.frontend_smoke_path }}"
+          RETRIES="${{ inputs.smoke_test_retries }}"
+
+          docker pull --platform linux/amd64 "$REF"
+          docker run -d --rm --name frontend-smoke-test -p "${HOST_PORT}:${CONTAINER_PORT}" "$REF"
+
+          for i in $(seq 1 "${RETRIES}"); do
+            if curl -fsS "http://localhost:${HOST_PORT}${PATH_TO_CHECK}" >/dev/null 2>&1; then
               docker stop frontend-smoke-test >/dev/null 2>&1 || true
               exit 0
             fi
             sleep 2
           done
+
           docker logs frontend-smoke-test || true
           docker stop frontend-smoke-test >/dev/null 2>&1 || true
           exit 1
@@ -1828,15 +1867,22 @@ jobs:
         run: |
           docker stop backend-smoke-test frontend-smoke-test >/dev/null 2>&1 || true
 
-  promote-to-latest:
+  promote_to_latest:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: [detect, build-and-push-images, image-security-scan, smoke-test]
-    if: inputs.promote_to_latest == true && github.ref_name == github.event.repository.default_branch && needs.detect.outputs.build_any_image == 'true'
+    needs: [detect, build_and_push_images, image_security_scan, smoke_test]
+    if: >-
+      ${{
+        inputs.promote_to_latest == true
+        && github.ref_name == github.event.repository.default_branch
+        && needs.detect.outputs.build_any_image == 'true'
+        && needs.build_and_push_images.result == 'success'
+        && needs.image_security_scan.result == 'success'
+        && (inputs.run_smoke_test == false || needs.smoke_test.result == 'success')
+      }}
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1853,40 +1899,39 @@ jobs:
           username: ${{ env.DOCKERHUB_USERNAME }}
           password: ${{ env.DOCKERHUB_TOKEN }}
 
-      - name: Promote backend to latest 
+      - name: Promote backend to latest
         if: needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          REPO="${{ needs.build-and-push-images.outputs.backend_repo }}"
-          DIGEST="${{ needs.build-and-push-images.outputs.backend_digest }}"
+          REPO="${{ needs.build_and_push_images.outputs.backend_repo }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
           docker buildx imagetools create -t "${REPO}:latest" "${REPO}@${DIGEST}"
 
       - name: Promote frontend to latest
         if: needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REPO="${{ needs.build-and-push-images.outputs.frontend_repo }}"
-          DIGEST="${{ needs.build-and-push-images.outputs.frontend_digest }}"
+          REPO="${{ needs.build_and_push_images.outputs.frontend_repo }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
           docker buildx imagetools create -t "${REPO}:latest" "${REPO}@${DIGEST}"
 
-  release-summary:
+  release_summary:
     runs-on: ubuntu-latest
     needs:
       [
         detect,
-        pre-release-security,
-        license-compliance,
-        supply-chain-security,
-        build-and-push-images,
-        image-security-scan,
-        smoke-test,
-        promote-to-latest,
+        pre_release_security,
+        license_compliance,
+        supply_chain_security,
+        build_and_push_images,
+        image_security_scan,
+        smoke_test,
+        promote_to_latest,
       ]
     if: always()
     permissions:
       contents: read
       actions: write
-
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1931,12 +1976,12 @@ jobs:
 
           echo "## Images" >> consolidated-report.md
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
-            echo "- Backend: ${{ needs.build-and-push-images.outputs.backend_image_name }}" >> consolidated-report.md
-            echo "  - Digest: ${{ needs.build-and-push-images.outputs.backend_digest }}" >> consolidated-report.md
+            echo "- Backend: ${{ needs.build_and_push_images.outputs.backend_image_name }}" >> consolidated-report.md
+            echo "  - Digest: ${{ needs.build_and_push_images.outputs.backend_digest }}" >> consolidated-report.md
           fi
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
-            echo "- Frontend: ${{ needs.build-and-push-images.outputs.frontend_image_name }}" >> consolidated-report.md
-            echo "  - Digest: ${{ needs.build-and-push-images.outputs.frontend_digest }}" >> consolidated-report.md
+            echo "- Frontend: ${{ needs.build_and_push_images.outputs.frontend_image_name }}" >> consolidated-report.md
+            echo "  - Digest: ${{ needs.build_and_push_images.outputs.frontend_digest }}" >> consolidated-report.md
           fi
 
           cat consolidated-report.md >> "$GITHUB_STEP_SUMMARY"
@@ -1966,13 +2011,13 @@ jobs:
           ## Pipeline Status
           | Stage | Status | Details |
           |-------|--------|---------|
-          | Pre-release Security | ${{ needs.pre-release-security.result }} | SAST, secrets, dependency scans |
-          | License Compliance | ${{ needs.license-compliance.result }} | License checks |
-          | Supply Chain Security | ${{ needs.supply-chain-security.result }} | Scorecard, dependency review |
-          | Build & Push Images | ${{ needs.build-and-push-images.result }} | Multi-arch: ${{ inputs.enable_multi_arch }} |
-          | Image Security Scan | ${{ needs.image-security-scan.result }} | Trivy + Grype + SBOM + Cosign |
-          | Smoke Tests | ${{ needs.smoke-test.result }} | Health checks and accessibility |
-          | Promote to Latest | ${{ needs.promote-to-latest.result }} | ${{ inputs.promote_to_latest && github.ref_name == github.event.repository.default_branch && 'Enabled' || 'Skipped' }} |
+          | Pre-release Security | ${{ needs.pre_release_security.result }} | SAST, secrets, dependency scans |
+          | License Compliance | ${{ needs.license_compliance.result }} | License checks |
+          | Supply Chain Security | ${{ needs.supply_chain_security.result }} | Scorecard, dependency review |
+          | Build & Push Images | ${{ needs.build_and_push_images.result }} | Multi-arch: ${{ inputs.enable_multi_arch }} |
+          | Image Security Scan | ${{ needs.image_security_scan.result }} | Trivy + Grype + SBOM + Cosign |
+          | Smoke Tests | ${{ needs.smoke_test.result }} | Health checks and accessibility |
+          | Promote to Latest | ${{ needs.promote_to_latest.result }} | ${{ inputs.promote_to_latest && github.ref_name == github.event.repository.default_branch && 'Enabled' || 'Skipped' }} |
 
           ## Security Features
           - SBOM Generation: ${{ inputs.enable_sbom_generation && 'Enabled (CycloneDX + SPDX)' || 'Disabled' }}
@@ -1998,26 +2043,26 @@ jobs:
 
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
             cat >> $GITHUB_STEP_SUMMARY <<EOF
-          - Backend Image: \`${{ needs.build-and-push-images.outputs.backend_image_name }}\`
-            - Digest: \`${{ needs.build-and-push-images.outputs.backend_digest || 'N/A' }}\`
+          - Backend Image: \`${{ needs.build_and_push_images.outputs.backend_image_name }}\`
+            - Digest: \`${{ needs.build_and_push_images.outputs.backend_digest || 'N/A' }}\`
           EOF
           fi
 
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
             cat >> $GITHUB_STEP_SUMMARY <<EOF
-          - Frontend Image: \`${{ needs.build-and-push-images.outputs.frontend_image_name }}\`
-            - Digest: \`${{ needs.build-and-push-images.outputs.frontend_digest || 'N/A' }}\`
+          - Frontend Image: \`${{ needs.build_and_push_images.outputs.frontend_image_name }}\`
+            - Digest: \`${{ needs.build_and_push_images.outputs.frontend_digest || 'N/A' }}\`
           EOF
           fi
 
           cat >> $GITHUB_STEP_SUMMARY <<'EOF'
 
           ## Scan Results Summary
-          - Pre-release security scan: ${{ needs.pre-release-security.result }}
-          - License compliance: ${{ needs.license-compliance.result }}
-          - Supply chain security: ${{ needs.supply-chain-security.result }}
-          - Container image scans: ${{ needs.image-security-scan.result }}
-          - Smoke tests: ${{ needs.smoke-test.result }}
+          - Pre-release security scan: ${{ needs.pre_release_security.result }}
+          - License compliance: ${{ needs.license_compliance.result }}
+          - Supply chain security: ${{ needs.supply_chain_security.result }}
+          - Container image scans: ${{ needs.image_security_scan.result }}
+          - Smoke tests: ${{ needs.smoke_test.result }}
 
           ## Tags Created
           - SHA Tag: \`${{ env.IMAGE_TAG }}\`
@@ -2041,20 +2086,24 @@ jobs:
           See Consolidated Security Report above for detailed findings.
           EOF
 
-
       - name: Check release pipeline success
         if: inputs.enforce_policies
         env:
-          PRE_RELEASE_SECURITY_RESULT: ${{ needs.pre-release-security.result }}
-          LICENSE_COMPLIANCE_RESULT: ${{ needs.license-compliance.result }}
-          SUPPLY_CHAIN_SECURITY_RESULT: ${{ needs.supply-chain-security.result }}
-          IMAGE_SCAN_RESULT: ${{ needs.image-security-scan.result }}
-          SMOKE_TEST_RESULT: ${{ needs.smoke-test.result }}
+          PRE_RELEASE_SECURITY_RESULT: ${{ needs.pre_release_security.result }}
+          LICENSE_COMPLIANCE_RESULT: ${{ needs.license_compliance.result }}
+          SUPPLY_CHAIN_SECURITY_RESULT: ${{ needs.supply_chain_security.result }}
+          IMAGE_SCAN_RESULT: ${{ needs.image_security_scan.result }}
+          RUN_SMOKE_TEST: ${{ inputs.run_smoke_test }}
+          SMOKE_TEST_RESULT: ${{ needs.smoke_test.result }}
         run: |
           failures=0
           if [ "${PRE_RELEASE_SECURITY_RESULT}" = "failure" ]; then failures=1; fi
           if [ "${LICENSE_COMPLIANCE_RESULT}" = "failure" ]; then failures=1; fi
           if [ "${SUPPLY_CHAIN_SECURITY_RESULT}" = "failure" ]; then failures=1; fi
           if [ "${IMAGE_SCAN_RESULT}" = "failure" ]; then failures=1; fi
-          if [ "${SMOKE_TEST_RESULT}" = "failure" ]; then failures=1; fi
+
+          if [ "${RUN_SMOKE_TEST}" = "true" ] && [ "${SMOKE_TEST_RESULT}" = "failure" ]; then
+            failures=1
+          fi
+
           if [ "$failures" -ne 0 ]; then exit 1; fi
