@@ -477,7 +477,7 @@ jobs:
         continue-on-error: true
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
 
       - name: TruffleHog secrets scan
         if: inputs.enable_secrets_scanning
@@ -1220,8 +1220,8 @@ jobs:
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags: ${{ steps.set_images.outputs.backend_image_name }}
           pull: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend,ignore-error=true
           provenance: ${{ inputs.enable_slsa_provenance && 'true' || 'false' }}
           sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
           labels: |
@@ -1239,8 +1239,8 @@ jobs:
           platforms: ${{ inputs.enable_multi_arch && 'linux/amd64,linux/arm64' || 'linux/amd64' }}
           tags: ${{ steps.set_images.outputs.frontend_image_name }}
           pull: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=frontend
+          cache-to: type=gha,mode=max,scope=frontend,ignore-error=true
           provenance: ${{ inputs.enable_slsa_provenance && 'true' || 'false' }}
           sbom: ${{ inputs.enable_sbom_generation && 'true' || 'false' }}
           labels: |
@@ -1371,9 +1371,9 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
-          echo "Backend SBOM REF=$REF"
-          [ -n "$REF" ] || { echo "::error::Backend image reference is empty"; exit 1; }
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=backend-release-sbom.spdx.json
 
@@ -1381,8 +1381,9 @@ jobs:
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
-          echo "Frontend SBOM REF=$REF"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
 
@@ -1444,14 +1445,18 @@ jobs:
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_backend_image == 'true'
         id: snyk_container_backend
         run: |
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-backend.sarif
 
       - name: Snyk container test (frontend)
         if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_frontend_image == 'true'
         id: snyk_container_frontend
         run: |
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-frontend.sarif
 
       - name: Trivy scan backend image
@@ -1459,7 +1464,9 @@ jobs:
         id: trivy_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-backend-release.sarif "$REF"
 
@@ -1484,7 +1491,9 @@ jobs:
         id: trivy_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-frontend-release.sarif "$REF"
 
@@ -1511,6 +1520,7 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
 
           tmp="$(mktemp)"
           set +e
@@ -1532,6 +1542,7 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
 
           tmp="$(mktemp)"
           set +e
@@ -1552,19 +1563,25 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.backend_image_name }}"
-          set +e
-          dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-backend-report.json "$REF"
-          rc=$?
-          set -e
+          dockle --format json "$REF" > dockle-backend-report.json || true
+
+          fatal="$(jq -r '.summary.fatal // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
+          warn="$(jq -r '.summary.warn // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
+          info="$(jq -r '.summary.info // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
+
+          echo "fatal=${fatal} warn=${warn} info=${info}"
+
+          rc=0
+          case "${DOCKLE_SEVERITY}" in
+            FATAL) [ "${fatal}" -gt 0 ] && rc=1 || rc=0 ;;
+            WARN)  [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+            INFO)  [ "$((fatal+warn+info))" -gt 0 ] && rc=1 || rc=0 ;;
+            *)     [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+          esac
+
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-
-          if [ -f "dockle-backend-report.json" ]; then
-            jq -r '.details[]? | "\(.code): \(.title) (Level: \(.level))"' dockle-backend-report.json || true
-            jq -r '.summary? // empty' dockle-backend-report.json || true
-          fi
-
           if [ "$rc" -ne 0 ]; then
-            echo "::warning::Dockle backend failed threshold (exit=$rc)"
+            echo "::warning::Dockle backend failed threshold (${DOCKLE_SEVERITY})"
           fi
 
       - name: Dockle scan frontend image
@@ -1573,19 +1590,25 @@ jobs:
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.frontend_image_name }}"
-          set +e
-          dockle --exit-level "${DOCKLE_SEVERITY}" --exit-code 1 --format json --output dockle-frontend-report.json "$REF"
-          rc=$?
-          set -e
+          dockle --format json "$REF" > dockle-frontend-report.json || true
+
+          fatal="$(jq -r '.summary.fatal // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
+          warn="$(jq -r '.summary.warn // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
+          info="$(jq -r '.summary.info // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
+
+          echo "fatal=${fatal} warn=${warn} info=${info}"
+
+          rc=0
+          case "${DOCKLE_SEVERITY}" in
+            FATAL) [ "${fatal}" -gt 0 ] && rc=1 || rc=0 ;;
+            WARN)  [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+            INFO)  [ "$((fatal+warn+info))" -gt 0 ] && rc=1 || rc=0 ;;
+            *)     [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+          esac
+
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-
-          if [ -f "dockle-frontend-report.json" ]; then
-            jq -r '.details[]? | "\(.code): \(.title) (Level: \(.level))"' dockle-frontend-report.json || true
-            jq -r '.summary? // empty' dockle-frontend-report.json || true
-          fi
-
           if [ "$rc" -ne 0 ]; then
-            echo "::warning::Dockle frontend failed threshold (exit=$rc)"
+            echo "::warning::Dockle frontend failed threshold (${DOCKLE_SEVERITY})"
           fi
 
       - name: Dive analysis backend image
@@ -1756,7 +1779,9 @@ jobs:
       - name: Sign backend image
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
         run: |
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           cosign sign --yes \
             --annotations build-timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --annotations git-sha="${{ env.IMAGE_TAG }}" \
@@ -1767,7 +1792,9 @@ jobs:
       - name: Sign frontend image
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
         run: |
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           cosign sign --yes \
             --annotations build-timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --annotations git-sha="${{ env.IMAGE_TAG }}" \
@@ -1780,7 +1807,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${{ needs.build_and_push_images.outputs.backend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity "${{ inputs.expected_signing_identity }}" \
@@ -1791,7 +1820,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
+          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             --certificate-identity "${{ inputs.expected_signing_identity }}" \
@@ -1960,6 +1991,7 @@ jobs:
           set -euo pipefail
           REPO="${{ needs.build_and_push_images.outputs.backend_repo }}"
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
           docker buildx imagetools create -t "${REPO}:latest" "${REPO}@${DIGEST}"
 
       - name: Promote frontend to latest
@@ -1968,6 +2000,7 @@ jobs:
           set -euo pipefail
           REPO="${{ needs.build_and_push_images.outputs.frontend_repo }}"
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
+          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
           docker buildx imagetools create -t "${REPO}:latest" "${REPO}@${DIGEST}"
 
   release_summary:
@@ -1993,13 +2026,168 @@ jobs:
         with:
           egress-policy: audit
 
-      - name: Download all artifacts
+      - name: List artifacts in this run
+        id: list_artifacts
         if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
+          curl -sSf \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$api" > run-artifacts.json
+
+          has_name() {
+            local n="$1"
+            jq -e --arg n "$n" '.artifacts[]? | select(.name == $n) | .id' run-artifacts.json >/dev/null 2>&1
+          }
+
+          has_sarif=false
+          if jq -e '[.artifacts[]?.name | test("sarif";"i")] | any' run-artifacts.json >/dev/null 2>&1; then
+            has_sarif=true
+          fi
+
+          {
+            echo "has_sarif_pattern=$has_sarif"
+          } >> "$GITHUB_OUTPUT"
+
+          for n in semgrep-release trivy-prebuild-vuln trivy-secrets snyk-sarifs release-sboms dockle-reports dependency-check license-reports; do
+            key="has_${n//-/_}"
+            if has_name "$n"; then
+              echo "${key}=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${key}=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - name: Download SARIF-heavy artifacts
+        id: dl_sarifs
+        if: always() && steps.list_artifacts.outputs.has_sarif_pattern == 'true'
         continue-on-error: true
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
         with:
           path: artifacts
+          pattern: "*sarif*"
           merge-multiple: false
+
+      - name: Download Semgrep artifact
+        id: dl_semgrep
+        if: always() && steps.list_artifacts.outputs.has_semgrep_release == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: semgrep-release
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download Trivy prebuild SARIF artifact
+        id: dl_trivy_prebuild
+        if: always() && steps.list_artifacts.outputs.has_trivy_prebuild_vuln == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: trivy-prebuild-vuln
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download Trivy secrets SARIF artifact
+        id: dl_trivy_secrets
+        if: always() && steps.list_artifacts.outputs.has_trivy_secrets == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: trivy-secrets
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download Snyk SARIF artifacts
+        id: dl_snyk_sarifs
+        if: always() && steps.list_artifacts.outputs.has_snyk_sarifs == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: snyk-sarifs
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download SBOM artifact
+        id: dl_sboms
+        if: always() && steps.list_artifacts.outputs.has_release_sboms == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: release-sboms
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download Dockle reports
+        id: dl_dockle
+        if: always() && steps.list_artifacts.outputs.has_dockle_reports == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: dockle-reports
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download Dependency-Check reports
+        id: dl_depcheck
+        if: always() && steps.list_artifacts.outputs.has_dependency_check == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: dependency-check
+          path: artifacts
+          merge-multiple: false
+
+      - name: Download license reports
+        id: dl_licenses
+        if: always() && steps.list_artifacts.outputs.has_license_reports == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
+        with:
+          name: license-reports
+          path: artifacts
+          merge-multiple: false
+
+      - name: Report artifact download failures (visible in summary)
+        if: always()
+        env:
+          DL_SARIFS:         ${{ steps.dl_sarifs.outcome }}
+          DL_SEMGREP:        ${{ steps.dl_semgrep.outcome }}
+          DL_TRIVY_PREBUILD: ${{ steps.dl_trivy_prebuild.outcome }}
+          DL_TRIVY_SECRETS:  ${{ steps.dl_trivy_secrets.outcome }}
+          DL_SNYK_SARIFS:    ${{ steps.dl_snyk_sarifs.outcome }}
+          DL_SBOMS:          ${{ steps.dl_sboms.outcome }}
+          DL_DOCKLE:         ${{ steps.dl_dockle.outcome }}
+          DL_DEPCHECK:       ${{ steps.dl_depcheck.outcome }}
+          DL_LICENSES:       ${{ steps.dl_licenses.outcome }}
+        run: |
+          set -euo pipefail
+          failed=()
+
+          [ "${DL_SARIFS:-}"         = "failure" ] && failed+=("pattern=*sarif*")
+          [ "${DL_SEMGREP:-}"        = "failure" ] && failed+=("semgrep-release")
+          [ "${DL_TRIVY_PREBUILD:-}" = "failure" ] && failed+=("trivy-prebuild-vuln")
+          [ "${DL_TRIVY_SECRETS:-}"  = "failure" ] && failed+=("trivy-secrets")
+          [ "${DL_SNYK_SARIFS:-}"    = "failure" ] && failed+=("snyk-sarifs")
+          [ "${DL_SBOMS:-}"          = "failure" ] && failed+=("release-sboms")
+          [ "${DL_DOCKLE:-}"         = "failure" ] && failed+=("dockle-reports")
+          [ "${DL_DEPCHECK:-}"       = "failure" ] && failed+=("dependency-check")
+          [ "${DL_LICENSES:-}"       = "failure" ] && failed+=("license-reports")
+
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::warning::Some artifacts failed to download: ${failed[*]}"
+            {
+              echo "## Artifact download failures"
+              for a in "${failed[@]}"; do echo "- $a"; done
+              echo ""
+              echo "The consolidated report below may be incomplete."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Generate consolidated security report (from downloaded artifacts)
         if: always()
