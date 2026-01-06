@@ -1982,14 +1982,14 @@ jobs:
     timeout-minutes: 15
     needs: [detect, build_and_push_images, image_security_scan, smoke_test]
     if: >-
-      ${{
-        always()
-        && inputs.promote_to_latest == true
-        && github.ref_name == github.event.repository.default_branch
-        && needs.detect.outputs.build_any_image == 'true'
-        && needs.build_and_push_images.result == 'success'
-        && needs.image_security_scan.result == 'success'
-        && (inputs.run_smoke_test == false || needs.smoke_test.result == 'success')
+      ${{ 
+        always() && 
+        inputs.promote_to_latest == true && 
+        github.ref_name == github.event.repository.default_branch &&
+        needs.detect.outputs.build_any_image == 'true' && 
+        needs.build_and_push_images.result == 'success' && 
+        needs.image_security_scan.result == 'success' && 
+        (inputs.run_smoke_test == false || needs.smoke_test.result == 'success')
       }}
     permissions:
       contents: read
