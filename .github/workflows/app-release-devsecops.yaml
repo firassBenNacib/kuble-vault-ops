@@ -1455,24 +1455,42 @@ jobs:
       - name: Grype scan backend image
         if: needs.detect.outputs.build_backend_image == 'true'
         id: grype_backend_image
+        shell: bash
         run: |
-          set +e
+          set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.backend_digest_ref }}"
-          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table
+
+          tmp="$(mktemp)"
+          set +e
+          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table | tee "$tmp"
           rc=$?
           set -e
+
+          echo ""
+          echo "Showing only HIGH/CRITICAL findings:"
+          { head -n 2 "$tmp"; grep -E '\s(High|Critical)\s*$' "$tmp" || true; }
+
           grype "$REF" -o sarif --file grype-backend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Grype scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
         id: grype_frontend_image
+        shell: bash
         run: |
-          set +e
+          set -euo pipefail
           REF="${{ needs.build-and-push-images.outputs.frontend_digest_ref }}"
-          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table
+
+          tmp="$(mktemp)"
+          set +e
+          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table | tee "$tmp"
           rc=$?
           set -e
+
+          echo ""
+          echo "Showing only HIGH/CRITICAL findings:"
+          { head -n 2 "$tmp"; grep -E '\s(High|Critical)\s*$' "$tmp" || true; }
+
           grype "$REF" -o sarif --file grype-frontend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
@@ -1743,11 +1761,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect, build-and-push-images, image-security-scan]
-    if: >-
-      ${{
-        needs.detect.outputs.build_any_image == 'true'
-        && needs.build-and-push-images.result == 'success'
-        && needs.image-security-scan.result == 'success'
+    if: ${{ always()
+      && needs.detect.outputs.build_any_image == 'true'
+      && needs.build-and-push-images.result == 'success'
+      && needs.image-security-scan.result == 'success'
       }}
     permissions:
       contents: read
@@ -1757,6 +1774,13 @@ jobs:
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
           egress-policy: audit
+
+      - name: Debug smoke-test gate values
+        if: always()
+        run: |
+          echo "build_any_image='${{ needs.detect.outputs.build_any_image }}'"
+          echo "build-and-push-images.result='${{ needs.build-and-push-images.result }}'"
+          echo "image-security-scan.result='${{ needs.image-security-scan.result }}'"
 
       - name: Log in to Docker Hub
         if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME != ''
