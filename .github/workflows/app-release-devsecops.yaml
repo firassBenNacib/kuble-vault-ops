@@ -1778,7 +1778,8 @@ jobs:
     needs: [detect, build_and_push_images, image_security_scan]
     if: >-
       ${{
-        inputs.run_smoke_test == true
+        always()
+        && inputs.run_smoke_test == true
         && needs.detect.outputs.build_any_image == 'true'
         && needs.build_and_push_images.result == 'success'
         && needs.image_security_scan.result == 'success'
