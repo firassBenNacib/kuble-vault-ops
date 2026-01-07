@@ -104,11 +104,52 @@ on:
         required: false
         type: boolean
         default: true
+      branch_policy:
+        description: "Branch policy for running the pipeline: any, default, allowlist"
+        required: false
+        type: string
+        default: "any"
+      branch_allowlist:
+        description: "Comma-separated branch names or globs (used when branch_policy=allowlist)"
+        required: false
+        type: string
+        default: ""
 
       expected_signing_identity:
         description: "Cosign verify certificate identity (keyless)."
-        required: true
+        required: false
         type: string
+        default: ""
+      enforce_tool_verification:
+        description: "Require checksums/digests for tool downloads"
+        required: false
+        type: boolean
+        default: false
+      trufflehog_image_digest:
+        description: "Pinned digest for TruffleHog image (sha256:...)"
+        required: false
+        type: string
+        default: ""
+      syft_sha256:
+        description: "SHA256 for syft_<version>_linux_amd64.tar.gz"
+        required: false
+        type: string
+        default: ""
+      grype_sha256:
+        description: "SHA256 for grype_<version>_linux_amd64.tar.gz"
+        required: false
+        type: string
+        default: ""
+      dockle_sha256:
+        description: "SHA256 for dockle_<version>_Linux-64bit.tar.gz"
+        required: false
+        type: string
+        default: ""
+      dive_sha256:
+        description: "SHA256 for dive_<version>_linux_amd64.deb"
+        required: false
+        type: string
+        default: ""
 
       run_smoke_test:
         description: "Run container smoke tests after image scanning"
@@ -153,7 +194,7 @@ on:
 
     secrets:
       DOCKERHUB_TOKEN:
-        required: true
+        required: false
       DEPENDENCY_TRACK_URL:
         required: false
       DEPENDENCY_TRACK_API_KEY:
@@ -189,24 +230,7 @@ env:
   TRIVY_SEVERITY: "CRITICAL,HIGH"
   GRYPE_FAIL_SEVERITY: "high"
   DOCKLE_SEVERITY: "FATAL"
-
-  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
-  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-
-  BACKEND_IMAGE_REPO: ${{ vars.BACKEND_IMAGE_REPO }}
-  FRONTEND_IMAGE_REPO: ${{ vars.FRONTEND_IMAGE_REPO }}
-
-  SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
-  SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
-
   COSIGN_EXPERIMENTAL: "true"
-
-  DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
-  DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
-
-  SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-  SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
-  NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
 
   BANNED_LICENSE_TOKENS: "GPL-3.0,AGPL-3.0,LGPL-3.0"
 
@@ -225,6 +249,9 @@ jobs:
       backend_image_dockerfile: ${{ steps.detect.outputs.backend_image_dockerfile }}
       frontend_image_context: ${{ steps.detect.outputs.frontend_image_context }}
       frontend_image_dockerfile: ${{ steps.detect.outputs.frontend_image_dockerfile }}
+      branch_allowed: ${{ steps.detect.outputs.branch_allowed }}
+      branch_policy: ${{ steps.detect.outputs.branch_policy }}
+      branch_reason: ${{ steps.detect.outputs.branch_reason }}
     permissions:
       contents: read
     steps:
@@ -345,6 +372,53 @@ jobs:
             build_any_image=true
           fi
 
+          branch_policy="${{ inputs.branch_policy }}"
+          branch_allowlist="${{ inputs.branch_allowlist }}"
+          ref_name="${{ github.ref_name }}"
+          default_branch="${{ github.event.repository.default_branch }}"
+          branch_allowed=false
+          branch_reason="policy=${branch_policy}"
+
+          case "$branch_policy" in
+            ""|any)
+              branch_allowed=true
+              branch_reason="policy=any"
+              ;;
+            default)
+              if [ "$ref_name" = "$default_branch" ]; then
+                branch_allowed=true
+                branch_reason="policy=default (match ${default_branch})"
+              else
+                branch_allowed=false
+                branch_reason="policy=default (current=${ref_name}, default=${default_branch})"
+              fi
+              ;;
+            allowlist)
+              branch_allowed=false
+              branch_reason="policy=allowlist (no match)"
+              if [ -n "$branch_allowlist" ]; then
+                IFS=',' read -r -a patterns <<< "$branch_allowlist"
+                for pat in "${patterns[@]}"; do
+                  pat="${pat//[[:space:]]/}"
+                  [ -z "$pat" ] && continue
+                  case "$ref_name" in
+                    $pat)
+                      branch_allowed=true
+                      branch_reason="policy=allowlist (match ${pat})"
+                      break
+                      ;;
+                  esac
+                done
+              else
+                branch_reason="policy=allowlist (empty list)"
+              fi
+              ;;
+            *)
+              echo "::error::Unknown branch_policy '${branch_policy}'. Use any, default, or allowlist."
+              exit 1
+              ;;
+          esac
+
           {
             echo "has_backend=$has_backend"
             echo "backend_dir=$backend_dir"
@@ -360,16 +434,23 @@ jobs:
             echo "frontend_image_dockerfile=$frontend_image_dockerfile"
 
             echo "build_any_image=$build_any_image"
+            echo "branch_allowed=$branch_allowed"
+            echo "branch_policy=$branch_policy"
+            echo "branch_reason=$branch_reason"
           } >> "$GITHUB_OUTPUT"
 
   pre_release_security:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     needs: [detect]
+    if: needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
       security-events: write
       actions: write
+    env:
+      HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
+      HAS_SOCKET_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -393,14 +474,23 @@ jobs:
         id: semgrep_release
         if: inputs.run_comprehensive_sast
         env:
-          SEMGREP_APP_TOKEN: ${{ env.SEMGREP_APP_TOKEN }}
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
-          set -e
+          set -euo pipefail
+          rc=0
           if [ -n "${SEMGREP_APP_TOKEN:-}" ]; then
-            semgrep ci --sarif --output semgrep-release.sarif || true
+            set +e
+            semgrep ci --sarif --output semgrep-release.sarif
+            rc=$?
+            set -e
           else
-            semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif || true
+            set +e
+            semgrep scan --config p/security-audit --sarif --output semgrep-release.sarif
+            rc=$?
+            set -e
           fi
+
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -485,7 +575,16 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          docker run --rm -v "$(pwd):/workdir" ghcr.io/trufflesecurity/trufflehog:${{ env.TRUFFLEHOG_TAG }} \
+          IMAGE_REF="ghcr.io/trufflesecurity/trufflehog:${{ env.TRUFFLEHOG_TAG }}"
+          if [ -n "${{ inputs.trufflehog_image_digest }}" ]; then
+            IMAGE_REF="ghcr.io/trufflesecurity/trufflehog@${{ inputs.trufflehog_image_digest }}"
+          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
+            echo "::error::trufflehog_image_digest is required when enforce_tool_verification=true"
+            exit 1
+          else
+            echo "::warning::trufflehog_image_digest not provided; using tag ${TRUFFLEHOG_TAG}"
+          fi
+          docker run --rm -v "$(pwd):/workdir" "$IMAGE_REF" \
             filesystem /workdir --only-verified 2>&1 | tee trufflehog.log
           tail -200 trufflehog.log
 
@@ -543,6 +642,8 @@ jobs:
         continue-on-error: true
         if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
         run: |
           set -e
           DEPENDENCY_CHECK_DATA="${RUNNER_TEMP}/dependency-check"
@@ -635,37 +736,41 @@ jobs:
       - name: Socket.dev supply chain protection
         id: socket_ci
         continue-on-error: true
-        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.SOCKET_CLI_API_TOKEN != ''
+        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          SOCKET_CLI_API_TOKEN: ${{ env.SOCKET_CLI_API_TOKEN }}
-          SOCKET_SECURITY_API_TOKEN: ${{ env.SOCKET_CLI_API_TOKEN }}
+          SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
+          SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
         run: |
           npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
 
       - name: Socket.dev skipped
-        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.SOCKET_CLI_API_TOKEN == ''
+        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN != 'true'
         run: |
           echo "::warning::Socket.dev is enabled but SOCKET_CLI_API_TOKEN is not set."
 
       - name: Install Snyk CLI
-        if: inputs.enable_snyk && env.SNYK_TOKEN != ''
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
         run: |
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
       - name: Snyk backend test
-        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         id: snyk_backend
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk test --severity-threshold=high --sarif-file-output="$GITHUB_WORKSPACE/snyk-backend.sarif"
 
       - name: Snyk frontend test
-        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.has_frontend == 'true'
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_frontend == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         id: snyk_frontend
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           snyk test --severity-threshold=high --sarif-file-output="$GITHUB_WORKSPACE/snyk-frontend.sarif"
 
@@ -792,8 +897,10 @@ jobs:
           TRIVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
           TRUFFLEHOG_OUTCOME: ${{ steps.trufflehog.outcome }}
+          SEMGREP_SARIF_EXISTS: ${{ steps.semgrep_release.outputs.sarif_exists }}
           SEMGREP_FINDING_COUNT: ${{ steps.semgrep_release.outputs.finding_count }}
           SOCKET_OUTCOME: ${{ steps.socket_ci.outcome }}
+          SOCKET_TOKEN_PRESENT: ${{ env.HAS_SOCKET_TOKEN }}
           DEPCHECK_ENABLED: ${{ inputs.enable_owasp_dependency_check }}
           DEPCHECK_OUTCOME: ${{ steps.depcheck.outcome }}
           NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
@@ -826,6 +933,10 @@ jobs:
             echo "::error::Semgrep found ${SEMGREP_FINDING_COUNT} security findings"
             failures=1
           fi
+          if [ "${{ inputs.run_comprehensive_sast }}" = "true" ] && [ "${SEMGREP_SARIF_EXISTS}" != "true" ]; then
+            echo "::error::Semgrep did not produce a SARIF report (scan likely failed)"
+            failures=1
+          fi
 
           if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_ENABLED}" = "true" ]; then
             if [ "${DEPCHECK_OUTCOME}" = "failure" ]; then
@@ -850,7 +961,7 @@ jobs:
             fi
           fi
 
-          if [ "${{ inputs.enable_socket }}" = "true" ] && [ -n "${{ env.SOCKET_CLI_API_TOKEN }}" ]; then
+          if [ "${{ inputs.enable_socket }}" = "true" ] && [ "${SOCKET_TOKEN_PRESENT}" = "true" ]; then
             if [ "${SOCKET_OUTCOME}" = "failure" ]; then
               echo "::error::Socket.dev policy failed"
               failures=1
@@ -865,7 +976,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: [detect]
-    if: inputs.enable_license_compliance
+    if: inputs.enable_license_compliance && needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
       actions: write
@@ -1011,6 +1122,8 @@ jobs:
       - name: Evaluate license compliance
         if: always() && inputs.enforce_policies
         env:
+          HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
+          HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
           MAVEN_RC: ${{ steps.maven_license.outputs.mvn_rc }}
           MAVEN_REPORT: ${{ steps.maven_license.outputs.report_generated }}
           MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
@@ -1018,22 +1131,24 @@ jobs:
         run: |
           failures=0
 
-          if [ "${MAVEN_RC:-0}" -ne 0 ]; then
-            echo "::error::Maven license report generation failed (exit=${MAVEN_RC})"
-            failures=1
+          if [ "${HAS_BACKEND}" = "true" ]; then
+            if [ "${MAVEN_RC:-0}" -ne 0 ]; then
+              echo "::error::Maven license report generation failed (exit=${MAVEN_RC})"
+              failures=1
+            fi
+
+            if [ "${MAVEN_REPORT}" != "true" ]; then
+              echo "::error::Missing THIRD-PARTY.txt (treating as policy failure)"
+              failures=1
+            fi
+
+            if [ "${MAVEN_BANNED}" = "true" ]; then
+              echo "::error::Maven dependencies contain banned licenses"
+              failures=1
+            fi
           fi
 
-          if [ "${MAVEN_REPORT}" != "true" ]; then
-            echo "::error::Missing THIRD-PARTY.txt (treating as policy failure)"
-            failures=1
-          fi
-
-          if [ "${MAVEN_BANNED}" = "true" ]; then
-            echo "::error::Maven dependencies contain banned licenses"
-            failures=1
-          fi
-
-          if [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_BANNED_COUNT:-0}" -ne 0 ]; then
             echo "::error::NPM dependencies contain banned licenses; count=${NPM_BANNED_COUNT}"
             failures=1
           fi
@@ -1044,7 +1159,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [detect]
-    if: inputs.enable_supply_chain_security && github.ref_name == github.event.repository.default_branch
+    if: inputs.enable_supply_chain_security && needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
       security-events: write
@@ -1072,7 +1187,6 @@ jobs:
           publish_results: false
 
       - name: Evaluate Scorecard policy
-        if: github.ref_name == github.event.repository.default_branch
         run: |
           python3 - <<'PY'
           import json
@@ -1110,13 +1224,10 @@ jobs:
       ${{
         always()
         && needs.detect.outputs.build_any_image == 'true'
+        && needs.detect.outputs.branch_allowed == 'true'
         && needs.pre_release_security.result == 'success'
         && ( inputs.enable_license_compliance == false || needs.license_compliance.result == 'success' )
-        && (
-          github.ref_name != github.event.repository.default_branch
-          || inputs.enable_supply_chain_security == false
-          || needs.supply_chain_security.result == 'success'
-        )
+        && ( inputs.enable_supply_chain_security == false || needs.supply_chain_security.result == 'success' )
       }}
     permissions:
       contents: read
@@ -1139,6 +1250,7 @@ jobs:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
       BACKEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.backend_image_repo && inputs.backend_image_repo || vars.BACKEND_IMAGE_REPO }}
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
+      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1153,6 +1265,8 @@ jobs:
       - name: Set image names
         id: set_images
         shell: bash
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -1230,11 +1344,11 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
+        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push backend image
         id: backend_build
@@ -1297,6 +1411,7 @@ jobs:
       ${{
         always()
         && needs.detect.outputs.build_any_image == 'true'
+        && needs.detect.outputs.branch_allowed == 'true'
         && needs.build_and_push_images.result == 'success'
       }}
     permissions:
@@ -1307,6 +1422,9 @@ jobs:
       actions: write
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
+      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
+      HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
+      HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1338,16 +1456,40 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh \
-            | sh -s -- -b "$BIN_DIR" "${{ env.SYFT_VERSION }}"
+          ver="${SYFT_VERSION#v}"
+          tgz="syft_${ver}_linux_amd64.tar.gz"
+          url="https://github.com/anchore/syft/releases/download/${SYFT_VERSION}/${tgz}"
+          curl -sSfL -o "/tmp/${tgz}" "$url"
+          if [ -n "${{ inputs.syft_sha256 }}" ]; then
+            echo "${{ inputs.syft_sha256 }}  /tmp/${tgz}" | sha256sum -c -
+          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
+            echo "::error::syft_sha256 is required when enforce_tool_verification=true"
+            exit 1
+          else
+            echo "::warning::syft_sha256 not provided; skipping checksum verification"
+          fi
+          tar -C "$BIN_DIR" -xzf "/tmp/${tgz}" syft
+          chmod +x "$BIN_DIR/syft"
           syft version
 
       - name: Install Grype
         shell: bash
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b "$BIN_DIR" "${{ env.GRYPE_VERSION }}"
+          ver="${GRYPE_VERSION#v}"
+          tgz="grype_${ver}_linux_amd64.tar.gz"
+          url="https://github.com/anchore/grype/releases/download/${GRYPE_VERSION}/${tgz}"
+          curl -sSfL -o "/tmp/${tgz}" "$url"
+          if [ -n "${{ inputs.grype_sha256 }}" ]; then
+            echo "${{ inputs.grype_sha256 }}  /tmp/${tgz}" | sha256sum -c -
+          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
+            echo "::error::grype_sha256 is required when enforce_tool_verification=true"
+            exit 1
+          else
+            echo "::warning::grype_sha256 not provided; skipping checksum verification"
+          fi
+          tar -C "$BIN_DIR" -xzf "/tmp/${tgz}" grype
+          chmod +x "$BIN_DIR/grype"
           grype version
 
       - name: Install Cosign
@@ -1356,6 +1498,12 @@ jobs:
         with:
           cosign-release: v${{ env.COSIGN_VERSION }}
 
+      - name: Validate signing identity input
+        if: inputs.enable_image_signing && inputs.expected_signing_identity == ''
+        run: |
+          echo "::error::expected_signing_identity must be set when enable_image_signing=true"
+          exit 1
+
       - name: Install Dockle
         if: inputs.enable_dockle
         run: |
@@ -1363,6 +1511,14 @@ jobs:
           ver="${DOCKLE_VERSION}"
           curl -fsSL -o /tmp/dockle.tgz \
             "https://github.com/goodwithtech/dockle/releases/download/v${ver}/dockle_${ver}_Linux-64bit.tar.gz"
+          if [ -n "${{ inputs.dockle_sha256 }}" ]; then
+            echo "${{ inputs.dockle_sha256 }}  /tmp/dockle.tgz" | sha256sum -c -
+          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
+            echo "::error::dockle_sha256 is required when enforce_tool_verification=true"
+            exit 1
+          else
+            echo "::warning::dockle_sha256 not provided; skipping checksum verification"
+          fi
           tar -C /tmp -xzf /tmp/dockle.tgz dockle
           sudo install -m 0755 /tmp/dockle /usr/local/bin/dockle
           dockle --version
@@ -1370,29 +1526,39 @@ jobs:
       - name: Install Dive
         if: inputs.enable_dive
         run: |
-          wget -q https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
-          sudo apt-get install -y -f ./dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
-          rm -f dive_${{ env.DIVE_VERSION }}_linux_amd64.deb
+          set -euo pipefail
+          file="dive_${{ env.DIVE_VERSION }}_linux_amd64.deb"
+          wget -q "https://github.com/wagoodman/dive/releases/download/v${{ env.DIVE_VERSION }}/${file}"
+          if [ -n "${{ inputs.dive_sha256 }}" ]; then
+            echo "${{ inputs.dive_sha256 }}  ${file}" | sha256sum -c -
+          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
+            echo "::error::dive_sha256 is required when enforce_tool_verification=true"
+            exit 1
+          else
+            echo "::warning::dive_sha256 not provided; skipping checksum verification"
+          fi
+          sudo apt-get install -y -f "./${file}"
+          rm -f "${file}"
           dive --version
 
       - name: Set up Node.js
-        if: inputs.enable_snyk && env.SNYK_TOKEN != ''
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
         with:
           node-version: "20"
 
       - name: Install Snyk CLI
-        if: inputs.enable_snyk && env.SNYK_TOKEN != ''
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
         run: |
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
+        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Generate backend SBOM with Syft
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
@@ -1429,7 +1595,10 @@ jobs:
           if [ -f "frontend-release-sbom.cdx.json" ]; then validate_sbom "frontend-release-sbom.cdx.json"; fi
 
       - name: Upload SBOM to Dependency-Track
-        if: inputs.enable_dependency_track && env.DEPENDENCY_TRACK_URL != '' && env.DEPENDENCY_TRACK_API_KEY != ''
+        if: inputs.enable_dependency_track && env.HAS_DEPENDENCY_TRACK == 'true'
+        env:
+          DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
+          DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
         run: |
           set -euo pipefail
 
@@ -1437,14 +1606,23 @@ jobs:
             local sbom_file="$1"
             local project_name="$2"
             local project_version="$3"
-
-            curl -sS -X POST \
+            local out_file
+            local http_code
+            out_file="$(mktemp)"
+            http_code="$(curl -sS -w "%{http_code}" -o "$out_file" -X POST \
               -H "X-Api-Key: $DEPENDENCY_TRACK_API_KEY" \
               -F "autoCreate=true" \
               -F "projectName=$project_name" \
               -F "projectVersion=$project_version" \
               -F "bom=@$sbom_file" \
-              "$DEPENDENCY_TRACK_URL/api/v1/bom" > /dev/null
+              "$DEPENDENCY_TRACK_URL/api/v1/bom")"
+            if [ "$http_code" -lt 200 ] || [ "$http_code" -ge 300 ]; then
+              echo "::error::Dependency-Track upload failed for ${sbom_file} (HTTP ${http_code})"
+              cat "$out_file" || true
+              rm -f "$out_file"
+              return 1
+            fi
+            rm -f "$out_file"
           }
 
           base="${GITHUB_REPOSITORY//\//-}"
@@ -1469,8 +1647,10 @@ jobs:
           fi
 
       - name: Snyk container test (backend)
-        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_backend_image == 'true'
         id: snyk_container_backend
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
           [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
@@ -1478,8 +1658,10 @@ jobs:
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-backend.sarif
 
       - name: Snyk container test (frontend)
-        if: inputs.enable_snyk && env.SNYK_TOKEN != '' && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_frontend_image == 'true'
         id: snyk_container_frontend
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
           [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
@@ -1863,6 +2045,7 @@ jobs:
       ${{
         always()
         && inputs.run_smoke_test == true
+        && needs.detect.outputs.branch_allowed == 'true'
         && needs.detect.outputs.build_any_image == 'true'
         && needs.build_and_push_images.result == 'success'
         && needs.image_security_scan.result == 'success'
@@ -1871,6 +2054,7 @@ jobs:
       contents: read
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
+      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1878,11 +2062,11 @@ jobs:
           egress-policy: audit
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
+        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Backend smoke test
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -1986,6 +2170,7 @@ jobs:
         always()
         && inputs.promote_to_latest == true
         && github.ref_name == github.event.repository.default_branch
+        && needs.detect.outputs.branch_allowed == 'true'
         && needs.detect.outputs.build_any_image == 'true'
         && needs.build_and_push_images.result == 'success'
         && needs.image_security_scan.result == 'success'
@@ -1996,6 +2181,7 @@ jobs:
       packages: write
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
+      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -2006,11 +2192,11 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to Docker Hub
-        if: env.DOCKERHUB_TOKEN != '' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
+        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
         uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
         with:
           username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Promote backend to latest
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -2061,11 +2247,18 @@ jobs:
         run: |
           set -euo pipefail
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
-          curl -sSf \
+          if ! curl -sSf \
             -H "Accept: application/vnd.github+json" \
             -H "Authorization: Bearer ${GH_TOKEN}" \
             -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$api" > run-artifacts.json
+            "$api" > run-artifacts.json; then
+            echo "::warning::Failed to list artifacts for this run."
+            echo "has_sarif_pattern=false" >> "$GITHUB_OUTPUT"
+            for n in semgrep-release trivy-prebuild-vuln trivy-secrets snyk-sarifs release-sboms dockle-reports dependency-check license-reports; do
+              echo "has_${n//-/_}=false" >> "$GITHUB_OUTPUT"
+            done
+            exit 0
+          fi
 
           has_name() {
             local n="$1"
@@ -2277,6 +2470,8 @@ jobs:
           - Frontend present: ${{ needs.detect.outputs.has_frontend }}
           - Backend image built: ${{ needs.detect.outputs.build_backend_image }}
           - Frontend image built: ${{ needs.detect.outputs.build_frontend_image }}
+          - Branch policy: ${{ needs.detect.outputs.branch_policy }}
+          - Branch policy result: ${{ needs.detect.outputs.branch_reason }}
 
           ## Pipeline Status
           | Stage | Status | Details |
