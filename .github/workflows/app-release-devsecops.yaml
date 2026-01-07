@@ -757,15 +757,19 @@ jobs:
 
           if [ "$pm" = "pnpm" ]; then
             pnpm audit --audit-level=high --json > "$output" 2>/dev/null || true
+            pnpm audit --audit-level=high || true
           elif [ "$pm" = "yarn" ]; then
             yver="$(yarn --version | cut -d. -f1)"
             if [ "${yver:-1}" -ge 2 ]; then
               yarn npm audit --json > "$output" 2>/dev/null || true
+              yarn npm audit || true
             else
               yarn audit --json > "$output" 2>/dev/null || true
+              yarn audit || true
             fi
           else
             npm audit --audit-level=high --json > "$output" 2>/dev/null || true
+            npm audit --audit-level=high || true
           fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
@@ -825,6 +829,15 @@ jobs:
           print(f"critical={critical}")
           print(f"high_critical_total={high+critical}")
           PY
+
+      - name: Upload frontend audit report
+        if: always() && needs.detect.outputs.has_frontend == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: frontend-audit
+          path: ${{ needs.detect.outputs.frontend_dir }}/frontend-audit.json
+          retention-days: 90
+          if-no-files-found: ignore
 
       - name: Socket.dev supply chain protection
         id: socket_ci
