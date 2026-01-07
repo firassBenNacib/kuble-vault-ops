@@ -129,7 +129,7 @@ on:
         description: "Require checksums/digests for tool downloads"
         required: false
         type: boolean
-        default: false
+        default: true
       trufflehog_image_digest:
         description: "Pinned digest for TruffleHog image (sha256:...)"
         required: false
@@ -468,6 +468,39 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Validate security tool secrets
+        if: always()
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          missing=0
+
+          if [ "${{ inputs.enable_snyk }}" = "true" ] && [ -z "${SNYK_TOKEN:-}" ]; then
+            msg="enable_snyk=true but SNYK_TOKEN is not set"
+            if [ "${{ inputs.enforce_policies }}" = "true" ]; then
+              echo "::error::$msg"
+              missing=1
+            else
+              echo "::warning::$msg"
+            fi
+          fi
+
+          if [ "${{ inputs.enable_socket }}" = "true" ] && [ -z "${SOCKET_CLI_API_TOKEN:-}" ]; then
+            msg="enable_socket=true but SOCKET_CLI_API_TOKEN is not set"
+            if [ "${{ inputs.enforce_policies }}" = "true" ]; then
+              echo "::error::$msg"
+              missing=1
+            else
+              echo "::warning::$msg"
+            fi
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
+
       - name: Install Semgrep for SAST
         if: inputs.run_comprehensive_sast
         run: |
@@ -713,29 +746,84 @@ jobs:
             npm ci --prefer-offline --no-audit --no-fund
           fi
 
-      - name: npm audit
-        if: needs.detect.outputs.has_frontend == 'true' && steps.fe_pm.outputs.pm == 'npm'
-        id: npm_audit
+      - name: Frontend dependency audit (npm/pnpm/yarn)
+        if: needs.detect.outputs.has_frontend == 'true'
+        id: fe_audit
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
-          npm audit --audit-level=high --json > npm-audit.json 2>/dev/null || true
+          pm="${{ steps.fe_pm.outputs.pm }}"
+          output="frontend-audit.json"
+
+          if [ "$pm" = "pnpm" ]; then
+            pnpm audit --audit-level=high --json > "$output" 2>/dev/null || true
+          elif [ "$pm" = "yarn" ]; then
+            yver="$(yarn --version | cut -d. -f1)"
+            if [ "${yver:-1}" -ge 2 ]; then
+              yarn npm audit --json > "$output" 2>/dev/null || true
+            else
+              yarn audit --json > "$output" 2>/dev/null || true
+            fi
+          else
+            npm audit --audit-level=high --json > "$output" 2>/dev/null || true
+          fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
+
+          def extract_counts(obj):
+            if not isinstance(obj, dict):
+              return None
+            meta = obj.get("metadata", {}).get("vulnerabilities")
+            if isinstance(meta, dict):
+              high = int(meta.get("high", 0) or 0)
+              critical = int(meta.get("critical", 0) or 0)
+              return high, critical
+            if obj.get("type") == "auditSummary":
+              vul = obj.get("data", {}).get("vulnerabilities", {})
+              if isinstance(vul, dict):
+                high = int(vul.get("high", 0) or 0)
+                critical = int(vul.get("critical", 0) or 0)
+                return high, critical
+            vul = obj.get("vulnerabilities")
+            if isinstance(vul, dict) and ("high" in vul or "critical" in vul):
+              high = int(vul.get("high", 0) or 0)
+              critical = int(vul.get("critical", 0) or 0)
+              return high, critical
+            return None
+
+          high = critical = 0
           try:
-            with open("npm-audit.json", "r") as f:
-              data=json.load(f)
-              vul=data.get("metadata",{}).get("vulnerabilities",{})
-              high=int(vul.get("high",0) or 0)
-              critical=int(vul.get("critical",0) or 0)
-              print(f"high={high}")
-              print(f"critical={critical}")
-              print(f"high_critical_total={high+critical}")
+            with open("frontend-audit.json", "r") as f:
+              content = f.read().strip()
           except Exception:
-            print("high=0")
-            print("critical=0")
-            print("high_critical_total=0")
+            content = ""
+
+          if not content:
+            pass
+          else:
+            try:
+              obj = json.loads(content)
+              res = extract_counts(obj)
+              if res:
+                high, critical = res
+            except Exception:
+              for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                  continue
+                try:
+                  obj = json.loads(line)
+                except Exception:
+                  continue
+                res = extract_counts(obj)
+                if res:
+                  high, critical = res
+                  break
+
+          print(f"high={high}")
+          print(f"critical={critical}")
+          print(f"high_critical_total={high+critical}")
           PY
 
       - name: Socket.dev supply chain protection
@@ -908,7 +996,7 @@ jobs:
           SOCKET_TOKEN_PRESENT: ${{ env.HAS_SOCKET_TOKEN }}
           DEPCHECK_ENABLED: ${{ inputs.enable_owasp_dependency_check }}
           DEPCHECK_OUTCOME: ${{ steps.depcheck.outcome }}
-          NPM_AUDIT_HC: ${{ steps.npm_audit.outputs.high_critical_total }}
+          FRONTEND_AUDIT_HC: ${{ steps.fe_audit.outputs.high_critical_total }}
           SNYK_BACKEND_OUTCOME: ${{ steps.snyk_backend.outcome }}
           SNYK_FRONTEND_OUTCOME: ${{ steps.snyk_frontend.outcome }}
         run: |
@@ -950,8 +1038,8 @@ jobs:
             fi
           fi
 
-          if [ "${HAS_FRONTEND}" = "true" ] && [ "${NPM_AUDIT_HC:-0}" -ne 0 ]; then
-            echo "::error::NPM audit found high/critical vulnerabilities (high+critical=${NPM_AUDIT_HC})"
+          if [ "${HAS_FRONTEND}" = "true" ] && [ "${FRONTEND_AUDIT_HC:-0}" -ne 0 ]; then
+            echo "::error::Frontend dependency audit found high/critical vulnerabilities (high+critical=${FRONTEND_AUDIT_HC})"
             failures=1
           fi
 
@@ -1092,7 +1180,7 @@ jobs:
         run: |
           set -euo pipefail
           npm exec --yes --package=license-checker@${{ env.LICENSE_CHECKER_VERSION }} -- \
-            license-checker --json --out licenses.json
+            license-checker --json --out licenses.json --production
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os, sys
@@ -1236,7 +1324,6 @@ jobs:
       }}
     permissions:
       contents: read
-      packages: write
       id-token: write
       attestations: write
       actions: write
@@ -1423,7 +1510,6 @@ jobs:
       contents: read
       security-events: write
       id-token: write
-      packages: write
       actions: write
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
@@ -1440,6 +1526,42 @@ jobs:
         uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
         with:
           persist-credentials: false
+
+      - name: Validate security tool secrets
+        if: always()
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
+          DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+
+          if [ "${{ inputs.enable_snyk }}" = "true" ] && [ -z "${SNYK_TOKEN:-}" ]; then
+            msg="enable_snyk=true but SNYK_TOKEN is not set"
+            if [ "${{ inputs.enforce_policies }}" = "true" ]; then
+              echo "::error::$msg"
+              missing=1
+            else
+              echo "::warning::$msg"
+            fi
+          fi
+
+          if [ "${{ inputs.enable_dependency_track }}" = "true" ]; then
+            if [ -z "${DEPENDENCY_TRACK_URL:-}" ] || [ -z "${DEPENDENCY_TRACK_API_KEY:-}" ]; then
+              msg="enable_dependency_track=true but DEPENDENCY_TRACK_URL/DEPENDENCY_TRACK_API_KEY are not set"
+              if [ "${{ inputs.enforce_policies }}" = "true" ]; then
+                echo "::error::$msg"
+                missing=1
+              else
+                echo "::warning::$msg"
+              fi
+            fi
+          fi
+
+          if [ "$missing" -ne 0 ]; then
+            exit 1
+          fi
 
       - name: Setup Trivy
         uses: aquasecurity/setup-trivy@e6c2c5e321ed9123bda567646e2f96565e34abe1
