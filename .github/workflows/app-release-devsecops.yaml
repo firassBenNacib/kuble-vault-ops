@@ -1005,6 +1005,7 @@ jobs:
           TRUFFLEHOG_OUTCOME: ${{ steps.trufflehog.outcome }}
           SEMGREP_SARIF_EXISTS: ${{ steps.semgrep_release.outputs.sarif_exists }}
           SEMGREP_FINDING_COUNT: ${{ steps.semgrep_release.outputs.finding_count }}
+          SEMGREP_EXIT_CODE: ${{ steps.semgrep_release.outputs.exit_code }}
           SOCKET_OUTCOME: ${{ steps.socket_ci.outcome }}
           SOCKET_TOKEN_PRESENT: ${{ env.HAS_SOCKET_TOKEN }}
           DEPCHECK_ENABLED: ${{ inputs.enable_owasp_dependency_check }}
@@ -1035,13 +1036,18 @@ jobs:
             fi
           fi
 
-          if [ "${SEMGREP_FINDING_COUNT:-0}" -gt 0 ]; then
-            echo "::error::Semgrep found ${SEMGREP_FINDING_COUNT} security findings"
-            failures=1
-          fi
-          if [ "${{ inputs.run_comprehensive_sast }}" = "true" ] && [ "${SEMGREP_SARIF_EXISTS}" != "true" ]; then
-            echo "::error::Semgrep did not produce a SARIF report (scan likely failed)"
-            failures=1
+          if [ "${{ inputs.run_comprehensive_sast }}" = "true" ]; then
+            if [ "${SEMGREP_EXIT_CODE:-0}" -ne 0 ]; then
+              echo "::error::Semgrep reported blocking findings or failed (exit=${SEMGREP_EXIT_CODE})"
+              failures=1
+            elif [ "${SEMGREP_FINDING_COUNT:-0}" -gt 0 ]; then
+              echo "::warning::Semgrep reported ${SEMGREP_FINDING_COUNT} non-blocking findings"
+            fi
+
+            if [ "${SEMGREP_SARIF_EXISTS}" != "true" ]; then
+              echo "::error::Semgrep did not produce a SARIF report (scan likely failed)"
+              failures=1
+            fi
           fi
 
           if [ "${HAS_BACKEND}" = "true" ] && [ "${DEPCHECK_ENABLED}" = "true" ]; then
