@@ -65,7 +65,12 @@ on:
         type: boolean
         default: true
       promote_to_latest:
-        description: "Promote images to :latest tag (default branch only)"
+        description: "Promote images to :latest tag (default branch unless allow_promote_non_default=true)"
+        required: false
+        type: boolean
+        default: false
+      allow_promote_non_default:
+        description: "Allow promote_to_latest on non-default branches (for testing)"
         required: false
         type: boolean
         default: false
@@ -2169,7 +2174,7 @@ jobs:
       ${{
         always()
         && inputs.promote_to_latest == true
-        && github.ref_name == github.event.repository.default_branch
+        && (github.ref_name == github.event.repository.default_branch || inputs.allow_promote_non_default == true)
         && needs.detect.outputs.branch_allowed == 'true'
         && needs.detect.outputs.build_any_image == 'true'
         && needs.build_and_push_images.result == 'success'
@@ -2482,7 +2487,7 @@ jobs:
           | Build & Push Images | ${{ needs.build_and_push_images.result }} | Multi-arch: ${{ inputs.enable_multi_arch }} |
           | Image Security Scan | ${{ needs.image_security_scan.result }} | Trivy + Grype + SBOM + Cosign |
           | Smoke Tests | ${{ needs.smoke_test.result }} | Health checks and accessibility |
-          | Promote to Latest | ${{ needs.promote_to_latest.result }} | ${{ inputs.promote_to_latest && github.ref_name == github.event.repository.default_branch && 'Enabled' || 'Skipped' }} |
+          | Promote to Latest | ${{ needs.promote_to_latest.result }} | ${{ inputs.promote_to_latest && (github.ref_name == github.event.repository.default_branch || inputs.allow_promote_non_default) && 'Enabled' || 'Skipped' }} |
 
           ## Security Features
           - SBOM Generation: ${{ inputs.enable_sbom_generation && 'Enabled (CycloneDX + SPDX)' || 'Disabled' }}
@@ -2533,13 +2538,13 @@ jobs:
           - SHA Tag: \`${{ env.IMAGE_TAG }}\`
           EOF
 
-          if [ "${{ inputs.promote_to_latest }}" = "true" ] && [ "${{ github.ref_name }}" = "${{ github.event.repository.default_branch }}" ]; then
+          if [ "${{ inputs.promote_to_latest }}" = "true" ] && { [ "${{ github.ref_name }}" = "${{ github.event.repository.default_branch }}" ] || [ "${{ inputs.allow_promote_non_default }}" = "true" ]; }; then
             cat >> $GITHUB_STEP_SUMMARY <<'EOF'
-          - Latest Tag: Promoted (default branch only)
+          - Latest Tag: Promoted (allowed branch)
           EOF
           else
             cat >> $GITHUB_STEP_SUMMARY <<'EOF'
-          - Latest Tag: Not promoted (disabled or not default branch)
+          - Latest Tag: Not promoted (disabled or not allowed branch)
           EOF
           fi
 
