@@ -675,7 +675,7 @@ jobs:
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: ./.github/setup-workflows/backend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@pipeline
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -683,7 +683,7 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: ./.github/setup-workflows/frontend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@pipeline
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
@@ -1112,7 +1112,7 @@ jobs:
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: ./.github/setup-workflows/backend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@pipeline
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -1120,7 +1120,7 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: ./.github/setup-workflows/frontend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@pipeline
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
@@ -1137,8 +1137,12 @@ jobs:
           mvn_rc=0
 
           if [ -f "pom.xml" ]; then
+            goal="add-third-party"
+            if grep -q "<modules>" pom.xml; then
+              goal="aggregate-add-third-party"
+            fi
             set +e
-            mvn -B -ntp org.codehaus.mojo:license-maven-plugin:${LICENSE_MAVEN_PLUGIN_VERSION}:add-third-party \
+            mvn -B -ntp org.codehaus.mojo:license-maven-plugin:${LICENSE_MAVEN_PLUGIN_VERSION}:${goal} \
               -Dlicense.excludedScopes=test,provided \
               -Dlicense.outputDirectory=target/generated-sources/license \
               -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
@@ -1147,8 +1151,19 @@ jobs:
             set -e
           fi
 
-          LIC_FILE="target/generated-sources/license/THIRD-PARTY.txt"
-          if [ -f "$LIC_FILE" ]; then
+          LIC_FILE=""
+          for f in \
+            "target/generated-sources/license/THIRD-PARTY.txt" \
+            "target/THIRD-PARTY.txt" \
+            "THIRD-PARTY.txt"
+          do
+            if [ -f "$f" ]; then
+              LIC_FILE="$f"
+              break
+            fi
+          done
+
+          if [ -n "$LIC_FILE" ]; then
             report_generated=true
             IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
             for token in "${TOKENS[@]}"; do
@@ -1158,7 +1173,7 @@ jobs:
               fi
             done
           else
-            echo "::error::No THIRD-PARTY.txt generated (cannot validate Maven licenses)"
+            echo "::error::No THIRD-PARTY.txt generated (searched target/generated-sources/license, target/, and repo root)"
           fi
 
           {
@@ -1507,7 +1522,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -1759,7 +1774,7 @@ jobs:
           snyk --version
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2289,7 +2304,7 @@ jobs:
           egress-policy: audit
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2430,7 +2445,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
