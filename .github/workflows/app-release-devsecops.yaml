@@ -14,27 +14,27 @@ on:
         type: string
         default: "dockerhub"
       registry_namespace:
-        description: "Registry namespace/org for dockerhub/ghcr (defaults to dockerhub_username or github.repository_owner)"
+        description: "Registry namespace/org for dockerhub/ghcr"
         required: false
         type: string
         default: ""
       ecr_account_id:
-        description: "AWS account ID for ECR (required when registry_provider=ecr)"
+        description: "AWS account ID for ECR"
         required: false
         type: string
         default: ""
       ecr_region:
-        description: "AWS region for ECR (required when registry_provider=ecr)"
+        description: "AWS region for ECR"
         required: false
         type: string
         default: ""
       aws_role_to_assume:
-        description: "AWS role ARN for ECR (OIDC). Leave empty to use access keys."
+        description: "AWS role ARN for ECR OIDC. Leave empty to use access keys."
         required: false
         type: string
         default: ""
       acr_login_server:
-        description: "Azure Container Registry login server (e.g., myregistry.azurecr.io)"
+        description: "Azure Container Registry login server, myregistry.azurecr.io"
         required: false
         type: string
         default: ""
@@ -45,6 +45,26 @@ on:
         default: ""
       frontend_image_repo:
         description: "Frontend image repo name"
+        required: false
+        type: string
+        default: ""
+      backend_dir:
+        description: "Override backend directory (auto-detect when empty)"
+        required: false
+        type: string
+        default: ""
+      frontend_dir:
+        description: "Override frontend directory (auto-detect when empty)"
+        required: false
+        type: string
+        default: ""
+      backend_dockerfile:
+        description: "Override backend Dockerfile path (auto-detect when empty)"
+        required: false
+        type: string
+        default: ""
+      frontend_dockerfile:
+        description: "Override frontend Dockerfile path (auto-detect when empty)"
         required: false
         type: string
         default: ""
@@ -95,17 +115,17 @@ on:
         type: boolean
         default: true
       promote_to_latest:
-        description: "Promote images to :latest tag (default branch unless allow_promote_non_default=true)"
+        description: "Promote images to :latest tag"
         required: false
         type: boolean
         default: false
       allow_promote_non_default:
-        description: "Allow promote_to_latest on non-default branches (for testing)"
+        description: "Allow promote_to_latest on non-default branches"
         required: false
         type: boolean
         default: false
       run_comprehensive_sast:
-        description: "Run comprehensive SAST (Semgrep) in release workflow"
+        description: "Run comprehensive SAST in release workflow"
         required: false
         type: boolean
         default: true
@@ -120,7 +140,7 @@ on:
         type: boolean
         default: true
       enable_owasp_dependency_check:
-        description: "Enable OWASP Dependency-Check (Java backend only)"
+        description: "Enable OWASP Dependency-Check for Java backends"
         required: false
         type: boolean
         default: false
@@ -145,13 +165,13 @@ on:
         type: string
         default: "any"
       branch_allowlist:
-        description: "Comma-separated branch names or globs (used when branch_policy=allowlist)"
+        description: "Comma-separated branch names or globs"
         required: false
         type: string
         default: ""
 
       expected_signing_identity:
-        description: "Cosign verify certificate identity (keyless). Defaults to the current job workflow identity when empty."
+        description: "Cosign verify certificate identity, keyless. Defaults to workflow identity when empty."
         required: false
         type: string
         default: ""
@@ -161,30 +181,30 @@ on:
         type: boolean
         default: true
       trufflehog_image_digest:
-        description: "Pinned digest for TruffleHog image (sha256:...)"
+        description: "Pinned digest for TruffleHog image, sha256:..."
         required: false
         type: string
-        default: ""
+        default: "sha256:c28ab4a11e01d6fcc10776f65cce015bdf9795f2393cffa2ec0a7c8464ee58b6"
       syft_sha256:
         description: "SHA256 for syft_<version>_linux_amd64.tar.gz"
         required: false
         type: string
-        default: ""
+        default: "6aa9a7b9e53c0f06e2d79fb24641cc1c856bb41702c282a577691f54bad94996"
       grype_sha256:
         description: "SHA256 for grype_<version>_linux_amd64.tar.gz"
         required: false
         type: string
-        default: ""
+        default: "cd79f842227fd1ba515f7bfd0be9547a8b712b44d4cab8f3a46df345d4b5f8bd"
       dockle_sha256:
         description: "SHA256 for dockle_<version>_Linux-64bit.tar.gz"
         required: false
         type: string
-        default: ""
+        default: "8bfc9183d1d3d67800edb45bea4bb63ddf1d28bec5f89944075a07007d79caad"
       dive_sha256:
         description: "SHA256 for dive_<version>_linux_amd64.deb"
         required: false
         type: string
-        default: ""
+        default: "0c20d18f0cc87e6e982a3289712ac3aa9fc364ba973109d1da3a473232640571"
 
       run_smoke_test:
         description: "Run container smoke tests after image scanning"
@@ -310,56 +330,75 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
 
       - name: Detect project structure
         id: detect
         run: |
           set -euo pipefail
 
+          backend_override="${{ inputs.backend_dir }}"
+          frontend_override="${{ inputs.frontend_dir }}"
+          backend_dockerfile_override="${{ inputs.backend_dockerfile }}"
+          frontend_dockerfile_override="${{ inputs.frontend_dockerfile }}"
+
           has_backend=false
           backend_dir="."
-          for d in "." "backend" "api" "server"; do
-            if [ -f "$d/pom.xml" ] || [ -d "$d/src/main/java" ] || [ -f "$d/build.gradle" ] || [ -f "$d/build.gradle.kts" ]; then
-              has_backend=true
-              backend_dir="$d"
-              break
+          if [ -n "$backend_override" ]; then
+            backend_dir="${backend_override%/}"
+            if [ ! -d "$backend_dir" ]; then
+              echo "::error::backend_dir override '$backend_dir' does not exist."
+              exit 1
             fi
-          done
+            has_backend=true
+          else
+            for d in "backend" "api" "server" "."; do
+              if [ -f "$d/pom.xml" ] || [ -d "$d/src/main/java" ] || [ -f "$d/build.gradle" ] || [ -f "$d/build.gradle.kts" ]; then
+                has_backend=true
+                backend_dir="$d"
+                break
+              fi
+            done
+          fi
 
           has_frontend=false
           frontend_dir="."
-          for d in "." "frontend" "client" "web" "ui"; do
-            is_node=false
-            if [ -f "$d/package.json" ] || [ -f "$d/package-lock.json" ] || [ -f "$d/pnpm-lock.yaml" ] || [ -f "$d/yarn.lock" ]; then
-              is_node=true
+          if [ -n "$frontend_override" ]; then
+            frontend_dir="${frontend_override%/}"
+            if [ ! -d "$frontend_dir" ]; then
+              echo "::error::frontend_dir override '$frontend_dir' does not exist."
+              exit 1
             fi
+            has_frontend=true
+          else
+            for d in "frontend" "client" "web" "ui" "."; do
+              is_node=false
+              if [ -f "$d/package.json" ] || [ -f "$d/package-lock.json" ] || [ -f "$d/pnpm-lock.yaml" ] || [ -f "$d/yarn.lock" ]; then
+                is_node=true
+              fi
 
-            is_ts_app=false
-            if [ -f "$d/tsconfig.json" ] && { [ -d "$d/src" ] || [ -d "$d/src/app" ]; }; then
-              is_ts_app=true
-            fi
+              is_ts_app=false
+              if [ -f "$d/tsconfig.json" ] && { [ -d "$d/src" ] || [ -d "$d/src/app" ]; }; then
+                is_ts_app=true
+              fi
 
-            is_framework=false
-            if [ -f "$d/vite.config.js" ] || [ -f "$d/vite.config.ts" ] || [ -f "$d/next.config.js" ]; then
-              is_framework=true
-            fi
+              is_framework=false
+              if [ -f "$d/vite.config.js" ] || [ -f "$d/vite.config.ts" ] || [ -f "$d/next.config.js" ]; then
+                is_framework=true
+              fi
 
-            if [ "$is_node" = "true" ] || [ "$is_ts_app" = "true" ] || [ "$is_framework" = "true" ]; then
-              has_frontend=true
-              frontend_dir="$d"
-              break
-            fi
-          done
+              if [ "$is_node" = "true" ] || [ "$is_ts_app" = "true" ] || [ "$is_framework" = "true" ]; then
+                has_frontend=true
+                frontend_dir="$d"
+                break
+              fi
+            done
+          fi
 
           root_dockerfile_exists=false
           if [ -f "Dockerfile" ]; then root_dockerfile_exists=true; fi
@@ -368,7 +407,20 @@ jobs:
           backend_image_context=""
           backend_image_dockerfile=""
 
-          if [ "$has_backend" = "true" ]; then
+          if [ -n "$backend_dockerfile_override" ]; then
+            backend_dockerfile_override="${backend_dockerfile_override%/}"
+            if [ ! -f "$backend_dockerfile_override" ]; then
+              echo "::error::backend_dockerfile override '$backend_dockerfile_override' does not exist."
+              exit 1
+            fi
+            build_backend_image=true
+            backend_image_dockerfile="$backend_dockerfile_override"
+            if [ "$backend_dir" != "." ] && [[ "$backend_dockerfile_override" == "$backend_dir/"* ]]; then
+              backend_image_context="$backend_dir"
+            else
+              backend_image_context="."
+            fi
+          elif [ "$has_backend" = "true" ]; then
             for dockerfile in "$backend_dir/Dockerfile" "docker/backend/Dockerfile"; do
               if [ -f "$dockerfile" ]; then
                 build_backend_image=true
@@ -393,7 +445,20 @@ jobs:
           frontend_image_context=""
           frontend_image_dockerfile=""
 
-          if [ "$has_frontend" = "true" ]; then
+          if [ -n "$frontend_dockerfile_override" ]; then
+            frontend_dockerfile_override="${frontend_dockerfile_override%/}"
+            if [ ! -f "$frontend_dockerfile_override" ]; then
+              echo "::error::frontend_dockerfile override '$frontend_dockerfile_override' does not exist."
+              exit 1
+            fi
+            build_frontend_image=true
+            frontend_image_dockerfile="$frontend_dockerfile_override"
+            if [ "$frontend_dir" != "." ] && [[ "$frontend_dockerfile_override" == "$frontend_dir/"* ]]; then
+              frontend_image_context="$frontend_dir"
+            else
+              frontend_image_context="."
+            fi
+          elif [ "$has_frontend" = "true" ]; then
             for dockerfile in "$frontend_dir/Dockerfile" "docker/frontend/Dockerfile"; do
               if [ -f "$dockerfile" ]; then
                 build_frontend_image=true
@@ -506,16 +571,12 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_SOCKET_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN != '' }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
 
       - name: Validate security tool secrets
         if: always()
@@ -606,8 +667,13 @@ jobs:
       - name: Trivy filesystem vulnerability scan
         id: trivy_prebuild
         run: |
+          set -euo pipefail
           trivy fs --scanners vuln --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table .
           trivy fs --scanners vuln --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-prebuild-vuln.sarif .
+          if [ ! -s "trivy-prebuild-vuln.sarif" ]; then
+            echo "::error::Trivy pre-build SARIF report missing or empty."
+            exit 1
+          fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -629,8 +695,13 @@ jobs:
         if: inputs.enable_secrets_scanning == true
         id: trivy_secrets
         run: |
+          set -euo pipefail
           trivy fs --scanners secret --format table --exit-code 0 --no-progress .
           trivy fs --scanners secret --format sarif --output trivy-secrets.sarif --exit-code 0 --no-progress .
+          if [ ! -s "trivy-secrets.sarif" ]; then
+            echo "::error::Trivy secrets SARIF report missing or empty."
+            exit 1
+          fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -1108,15 +1179,11 @@ jobs:
       contents: read
       actions: write
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+          egress_policy: audit
+          persist_credentials: false
 
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
@@ -1279,16 +1346,12 @@ jobs:
       pull-requests: read
       checks: read
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
 
       - name: Dependency Review (PR only)
         if: github.event_name == 'pull_request'
@@ -1379,15 +1442,11 @@ jobs:
       BACKEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.backend_image_repo && inputs.backend_image_repo || vars.BACKEND_IMAGE_REPO }}
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+          egress_policy: audit
+          persist_credentials: false
 
       - name: Set image names
         id: set_images
@@ -1622,15 +1681,11 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+          egress_policy: audit
+          persist_credentials: false
 
       - name: Validate security tool secrets
         if: always()
@@ -1730,12 +1785,17 @@ jobs:
       - name: Resolve signing identity
         if: inputs.enable_image_signing == true
         id: signing_identity
+        env:
+          GITHUB_CONTEXT: ${{ toJSON(github) }}
         run: |
           set -euo pipefail
           identity="${{ inputs.expected_signing_identity }}"
           if [ -z "$identity" ]; then
+            job_workflow_ref="$(python3 -c 'import json,os; print(json.loads(os.environ.get("GITHUB_CONTEXT","{}")).get("job_workflow_ref",""))' 2>/dev/null || true)"
             workflow_ref="${{ github.workflow_ref }}"
-            if [ -n "$workflow_ref" ]; then
+            if [ -n "$job_workflow_ref" ]; then
+              identity="https://github.com/${job_workflow_ref}"
+            elif [ -n "$workflow_ref" ]; then
               identity="https://github.com/${workflow_ref}"
             else
               echo "::error::Unable to resolve signing identity; set expected_signing_identity."
@@ -1934,6 +1994,10 @@ jobs:
           REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-backend-release.sarif "$REF"
+          if [ ! -s "trivy-backend-release.sarif" ]; then
+            echo "::error::Trivy backend image SARIF report missing or empty."
+            exit 1
+          fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
@@ -1961,6 +2025,10 @@ jobs:
           REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-frontend-release.sarif "$REF"
+          if [ ! -s "trivy-frontend-release.sarif" ]; then
+            echo "::error::Trivy frontend image SARIF report missing or empty."
+            exit 1
+          fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json, os
