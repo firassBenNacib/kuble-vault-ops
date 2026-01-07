@@ -1,0 +1,27 @@
+name: "Harden runner and checkout"
+description: "Apply step-security hardening and checkout the repository"
+inputs:
+  egress_policy:
+    description: "Egress policy for harden-runner"
+    required: false
+    default: "audit"
+  fetch_depth:
+    description: "Git fetch depth"
+    required: false
+    default: "1"
+  persist_credentials:
+    description: "Persist git credentials in checkout"
+    required: false
+    default: "false"
+runs:
+  using: "composite"
+  steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      with:
+        egress-policy: ${{ inputs.egress_policy }}
+    - name: Checkout repository
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+      with:
+        fetch-depth: ${{ inputs.fetch_depth }}
+        persist-credentials: ${{ inputs.persist_credentials }}

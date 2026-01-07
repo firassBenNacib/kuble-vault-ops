@@ -151,7 +151,7 @@ on:
         default: ""
 
       expected_signing_identity:
-        description: "Cosign verify certificate identity (keyless)."
+        description: "Cosign verify certificate identity (keyless). Defaults to the current job workflow identity when empty."
         required: false
         type: string
         default: ""
@@ -159,7 +159,7 @@ on:
         description: "Require checksums/digests for tool downloads"
         required: false
         type: boolean
-        default: false
+        default: true
       trufflehog_image_digest:
         description: "Pinned digest for TruffleHog image (sha256:...)"
         required: false
@@ -255,6 +255,9 @@ on:
       SOCKET_CLI_API_TOKEN:
         required: false
 
+permissions:
+  contents: read
+
 concurrency:
   group: release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
@@ -288,7 +291,7 @@ env:
 
 jobs:
   detect:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     outputs:
       has_backend: ${{ steps.detect.outputs.has_backend }}
       has_frontend: ${{ steps.detect.outputs.has_frontend }}
@@ -307,16 +310,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          fetch_depth: 0
 
       - name: Detect project structure
         id: detect
@@ -491,7 +488,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   pre_release_security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 30
     needs: [detect]
     if: needs.detect.outputs.branch_allowed == 'true'
@@ -503,16 +500,10 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_SOCKET_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN != '' }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+          fetch_depth: 0
 
       - name: Validate security tool secrets
         if: always()
@@ -548,7 +539,7 @@ jobs:
           fi
 
       - name: Install Semgrep for SAST
-        if: inputs.run_comprehensive_sast
+        if: inputs.run_comprehensive_sast == true
         run: |
           python3 -m pip install --no-cache-dir --upgrade pip
           python3 -m pip install --no-cache-dir semgrep==${{ env.SEMGREP_VERSION }}
@@ -556,7 +547,7 @@ jobs:
 
       - name: Run Semgrep SAST
         id: semgrep_release
-        if: inputs.run_comprehensive_sast
+        if: inputs.run_comprehensive_sast == true
         env:
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
@@ -623,7 +614,7 @@ jobs:
           PY
 
       - name: Trivy secret scan
-        if: inputs.enable_secrets_scanning
+        if: inputs.enable_secrets_scanning == true
         id: trivy_secrets
         run: |
           trivy fs --scanners secret --format table --exit-code 0 --no-progress .
@@ -646,7 +637,7 @@ jobs:
           PY
 
       - name: Gitleaks secrets scan
-        if: inputs.enable_secrets_scanning
+        if: inputs.enable_secrets_scanning == true
         id: gitleaks
         continue-on-error: true
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
@@ -654,7 +645,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: TruffleHog secrets scan
-        if: inputs.enable_secrets_scanning
+        if: inputs.enable_secrets_scanning == true
         id: trufflehog
         continue-on-error: true
         run: |
@@ -675,7 +666,7 @@ jobs:
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@pipeline
+        uses: ./.github/setup-workflows/backend
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -683,18 +674,18 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@pipeline
+        uses: ./.github/setup-workflows/frontend
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
 
       - name: Set Dependency-Check data directory
-        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_owasp_dependency_check == true && needs.detect.outputs.has_backend == 'true'
         run: echo "DEPENDENCY_CHECK_DATA=${RUNNER_TEMP}/dependency-check" >> "$GITHUB_ENV"
 
       - name: Cache OWASP Dependency-Check data
         id: depcheck_cache
-        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_owasp_dependency_check == true && needs.detect.outputs.has_backend == 'true'
         uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
         with:
           path: ${{ runner.temp }}/dependency-check
@@ -705,7 +696,7 @@ jobs:
       - name: Maven dependency check
         id: depcheck
         continue-on-error: true
-        if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_owasp_dependency_check == true && needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         env:
           NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
@@ -848,7 +839,7 @@ jobs:
       - name: Socket.dev supply chain protection
         id: socket_ci
         continue-on-error: true
-        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN == 'true'
+        if: inputs.enable_socket == true && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -858,18 +849,24 @@ jobs:
           npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
 
       - name: Socket.dev skipped
-        if: inputs.enable_socket && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN != 'true'
+        if: inputs.enable_socket == true && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN != 'true'
         run: |
           echo "::warning::Socket.dev is enabled but SOCKET_CLI_API_TOKEN is not set."
 
+      - name: Set up Node.js
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
+        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        with:
+          node-version: "20"
+
       - name: Install Snyk CLI
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
         run: |
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
       - name: Snyk backend test
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_backend == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         id: snyk_backend
         env:
@@ -878,7 +875,7 @@ jobs:
           snyk test --severity-threshold=high --sarif-file-output="$GITHUB_WORKSPACE/snyk-backend.sarif"
 
       - name: Snyk frontend test
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_frontend == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_frontend == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         id: snyk_frontend
         env:
@@ -937,7 +934,7 @@ jobs:
           echo "sarif_path=$sarif_path" >> "$GITHUB_OUTPUT"
 
       - name: Upload OWASP SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.depcheck_reports.outputs.exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.depcheck_reports.outputs.exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: ${{ steps.depcheck_reports.outputs.sarif_path }}
@@ -955,7 +952,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Snyk SARIF artifacts
-        if: always() && inputs.enable_snyk
+        if: always() && inputs.enable_snyk == true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: snyk-sarifs
@@ -966,42 +963,42 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Semgrep SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.semgrep_release.outputs.sarif_exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.semgrep_release.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: semgrep-release.sarif
           category: semgrep-release
 
       - name: Upload Trivy pre-build SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.trivy_prebuild.outputs.sarif_exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.trivy_prebuild.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: trivy-prebuild-vuln.sarif
           category: trivy-prebuild-release
 
       - name: Upload Trivy secrets SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.trivy_secrets.outputs.secret_sarif_exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.trivy_secrets.outputs.secret_sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: trivy-secrets.sarif
           category: trivy-secrets-release
 
       - name: Upload Snyk SARIF to code scanning (backend)
-        if: inputs.enable_code_scanning && hashFiles('snyk-backend.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('snyk-backend.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: snyk-backend.sarif
           category: snyk-backend-release
 
       - name: Upload Snyk SARIF to code scanning (frontend)
-        if: inputs.enable_code_scanning && hashFiles('snyk-frontend.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('snyk-frontend.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: snyk-frontend.sarif
           category: snyk-frontend-release
 
       - name: Evaluate pre-release security
-        if: always() && inputs.enforce_policies
+        if: always() && inputs.enforce_policies == true
         env:
           HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
           HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
@@ -1091,28 +1088,21 @@ jobs:
           fi
 
   license_compliance:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     needs: [detect]
-    if: inputs.enable_license_compliance && needs.detect.outputs.branch_allowed == 'true'
+    if: inputs.enable_license_compliance == true && needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
       actions: write
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
 
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@pipeline
+        uses: ./.github/setup-workflows/backend
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -1120,7 +1110,7 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@pipeline
+        uses: ./.github/setup-workflows/frontend
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
@@ -1222,7 +1212,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Evaluate license compliance
-        if: always() && inputs.enforce_policies
+        if: always() && inputs.enforce_policies == true
         env:
           HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
           HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
@@ -1258,10 +1248,10 @@ jobs:
           if [ "$failures" -ne 0 ]; then exit 1; fi
 
   supply_chain_security:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     needs: [detect]
-    if: inputs.enable_supply_chain_security && needs.detect.outputs.branch_allowed == 'true'
+    if: inputs.enable_supply_chain_security == true && needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
       security-events: write
@@ -1270,16 +1260,10 @@ jobs:
       pull-requests: read
       checks: read
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
         with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
-          fetch-depth: 0
+          fetch_depth: 0
 
       - name: Dependency Review (PR only)
         if: github.event_name == 'pull_request'
@@ -1321,7 +1305,7 @@ jobs:
           PY
 
       - name: Run OpenSSF Scorecard (SARIF)
-        if: inputs.enable_code_scanning
+        if: inputs.enable_code_scanning == true
         uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
         with:
           results_file: scorecard.sarif
@@ -1329,14 +1313,14 @@ jobs:
           publish_results: false
 
       - name: Upload Scorecard SARIF to code scanning
-        if: inputs.enable_code_scanning && hashFiles('scorecard.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('scorecard.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: scorecard.sarif
           category: scorecard-release
 
   build_and_push_images:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     needs: [detect, pre_release_security, license_compliance, supply_chain_security]
     if: >-
@@ -1370,15 +1354,8 @@ jobs:
       BACKEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.backend_image_repo && inputs.backend_image_repo || vars.BACKEND_IMAGE_REPO }}
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
 
       - name: Set image names
         id: set_images
@@ -1515,14 +1492,14 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
-        if: inputs.enable_multi_arch
+        if: inputs.enable_multi_arch == true
         uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
+        uses: ./.github/setup-workflows/registry-login
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -1592,7 +1569,7 @@ jobs:
           fi
 
   image_security_scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 45
     needs: [detect, build_and_push_images]
     if: >-
@@ -1613,15 +1590,8 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
-      - name: Harden Runner
-        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
-        with:
-          egress-policy: audit
-
-      - name: Checkout repository
-        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
-        with:
-          persist-credentials: false
+      - name: Harden runner and checkout
+        uses: ./.github/setup-workflows/harden-checkout
 
       - name: Validate security tool secrets
         if: always()
@@ -1674,7 +1644,7 @@ jobs:
           echo "BIN_DIR=$BIN_DIR" >> "$GITHUB_ENV"
 
       - name: Install Syft
-        if: inputs.enable_sbom_generation
+        if: inputs.enable_sbom_generation == true
         run: |
           set -euo pipefail
           ver="${SYFT_VERSION#v}"
@@ -1713,19 +1683,31 @@ jobs:
           grype version
 
       - name: Install Cosign
-        if: inputs.enable_image_signing
+        if: inputs.enable_image_signing == true
         uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad
         with:
           cosign-release: v${{ env.COSIGN_VERSION }}
 
-      - name: Validate signing identity input
-        if: inputs.enable_image_signing && inputs.expected_signing_identity == ''
+      - name: Resolve signing identity
+        if: inputs.enable_image_signing == true
+        id: signing_identity
         run: |
-          echo "::error::expected_signing_identity must be set when enable_image_signing=true"
-          exit 1
+          set -euo pipefail
+          identity="${{ inputs.expected_signing_identity }}"
+          if [ -z "$identity" ]; then
+            workflow_ref="${{ github.workflow_ref }}"
+            if [ -n "$workflow_ref" ]; then
+              identity="https://github.com/${workflow_ref}"
+            else
+              echo "::error::Unable to resolve signing identity; set expected_signing_identity."
+              exit 1
+            fi
+            echo "::warning::expected_signing_identity not set; using ${identity}"
+          fi
+          printf 'value=%s\n' "$identity" >> "$GITHUB_OUTPUT"
 
       - name: Install Dockle
-        if: inputs.enable_dockle
+        if: inputs.enable_dockle == true
         run: |
           set -euo pipefail
           ver="${DOCKLE_VERSION}"
@@ -1744,7 +1726,7 @@ jobs:
           dockle --version
 
       - name: Install Dive
-        if: inputs.enable_dive
+        if: inputs.enable_dive == true
         run: |
           set -euo pipefail
           file="dive_${{ env.DIVE_VERSION }}_linux_amd64.deb"
@@ -1762,19 +1744,19 @@ jobs:
           dive --version
 
       - name: Set up Node.js
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
         uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
         with:
           node-version: "20"
 
       - name: Install Snyk CLI
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
         run: |
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
       - name: Log in to registry
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
+        uses: ./.github/setup-workflows/registry-login
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -1792,7 +1774,7 @@ jobs:
           acr_password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Generate backend SBOM with Syft
-        if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_sbom_generation == true && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
@@ -1802,7 +1784,7 @@ jobs:
           syft --from registry "$REF" -o spdx-json=backend-release-sbom.spdx.json
 
       - name: Generate frontend SBOM with Syft
-        if: inputs.enable_sbom_generation && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_sbom_generation == true && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
@@ -1812,7 +1794,7 @@ jobs:
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
 
       - name: Validate SBOM quality
-        if: inputs.enable_sbom_generation
+        if: inputs.enable_sbom_generation == true
         run: |
           set -euo pipefail
           validate_sbom() {
@@ -1826,7 +1808,7 @@ jobs:
           if [ -f "frontend-release-sbom.cdx.json" ]; then validate_sbom "frontend-release-sbom.cdx.json"; fi
 
       - name: Upload SBOM to Dependency-Track
-        if: inputs.enable_dependency_track && env.HAS_DEPENDENCY_TRACK == 'true'
+        if: inputs.enable_dependency_track == true && env.HAS_DEPENDENCY_TRACK == 'true'
         env:
           DEPENDENCY_TRACK_URL: ${{ secrets.DEPENDENCY_TRACK_URL }}
           DEPENDENCY_TRACK_API_KEY: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}
@@ -1867,7 +1849,7 @@ jobs:
           fi
 
       - name: Pull images for local scanners (Dockle/Dive)
-        if: inputs.enable_dockle || inputs.enable_dive
+        if: inputs.enable_dockle == true || inputs.enable_dive == true
         run: |
           set -euo pipefail
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
@@ -1882,7 +1864,7 @@ jobs:
           fi
 
       - name: Snyk container test (backend)
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_backend_image == 'true'
         id: snyk_container_backend
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -1893,7 +1875,7 @@ jobs:
           snyk container test "$REF" --severity-threshold=high --sarif-file-output=snyk-container-backend.sarif
 
       - name: Snyk container test (frontend)
-        if: inputs.enable_snyk && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_frontend_image == 'true'
         id: snyk_container_frontend
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
@@ -2000,7 +1982,7 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
       - name: Dockle scan backend image
-        if: inputs.enable_dockle && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_dockle == true && needs.detect.outputs.build_backend_image == 'true'
         id: dockle_backend_image
         run: |
           set -euo pipefail
@@ -2031,7 +2013,7 @@ jobs:
           fi
 
       - name: Dockle scan frontend image
-        if: inputs.enable_dockle && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_dockle == true && needs.detect.outputs.build_frontend_image == 'true'
         id: dockle_frontend_image
         run: |
           set -euo pipefail
@@ -2062,7 +2044,7 @@ jobs:
           fi
 
       - name: Dive analysis backend image
-        if: inputs.enable_dive && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_dive == true && needs.detect.outputs.build_backend_image == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
@@ -2071,7 +2053,7 @@ jobs:
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Dive analysis frontend image
-        if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_dive == true && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
@@ -2079,7 +2061,7 @@ jobs:
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Upload release SBOMs
-        if: always() && inputs.enable_sbom_generation
+        if: always() && inputs.enable_sbom_generation == true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: release-sboms
@@ -2108,7 +2090,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload Snyk container SARIFs
-        if: always() && inputs.enable_snyk
+        if: always() && inputs.enable_snyk == true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: snyk-container-sarifs
@@ -2117,7 +2099,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Upload Dockle reports
-        if: always() && inputs.enable_dockle
+        if: always() && inputs.enable_dockle == true
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
           name: dockle-reports
@@ -2127,49 +2109,49 @@ jobs:
           if-no-files-found: warn
 
       - name: Upload Trivy backend SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.trivy_backend_image.outputs.sarif_exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.trivy_backend_image.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: trivy-backend-release.sarif
           category: trivy-backend-release
 
       - name: Upload Trivy frontend SARIF to code scanning
-        if: inputs.enable_code_scanning && steps.trivy_frontend_image.outputs.sarif_exists == 'true'
+        if: inputs.enable_code_scanning == true && steps.trivy_frontend_image.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: trivy-frontend-release.sarif
           category: trivy-frontend-release
 
       - name: Upload Grype backend SARIF to code scanning
-        if: inputs.enable_code_scanning && hashFiles('grype-backend-release.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('grype-backend-release.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: grype-backend-release.sarif
           category: grype-backend-release
 
       - name: Upload Grype frontend SARIF to code scanning
-        if: inputs.enable_code_scanning && hashFiles('grype-frontend-release.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('grype-frontend-release.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: grype-frontend-release.sarif
           category: grype-frontend-release
 
       - name: Upload Snyk container SARIF to code scanning (backend)
-        if: inputs.enable_code_scanning && hashFiles('snyk-container-backend.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('snyk-container-backend.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: snyk-container-backend.sarif
           category: snyk-container-backend
 
       - name: Upload Snyk container SARIF to code scanning (frontend)
-        if: inputs.enable_code_scanning && hashFiles('snyk-container-frontend.sarif') != ''
+        if: inputs.enable_code_scanning == true && hashFiles('snyk-container-frontend.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: snyk-container-frontend.sarif
           category: snyk-container-frontend
 
       - name: Evaluate image security scans
-        if: always() && inputs.enforce_policies
+        if: always() && inputs.enforce_policies == true
         env:
           BUILD_BACKEND: ${{ needs.detect.outputs.build_backend_image }}
           BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
@@ -2229,7 +2211,7 @@ jobs:
           if [ "$failures" -ne 0 ]; then exit 1; fi
 
       - name: Sign backend image
-        if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_image_signing == true && needs.detect.outputs.build_backend_image == 'true'
         run: |
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
           [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
@@ -2242,7 +2224,7 @@ jobs:
             "$REF"
 
       - name: Sign frontend image
-        if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_image_signing == true && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
           [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
@@ -2255,7 +2237,7 @@ jobs:
             "$REF"
 
       - name: Verify backend signature
-        if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
+        if: inputs.enable_image_signing == true && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
@@ -2263,11 +2245,11 @@ jobs:
           REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "${{ inputs.expected_signing_identity }}" \
+            --certificate-identity "${{ steps.signing_identity.outputs.value }}" \
             >/dev/null
 
       - name: Verify frontend signature
-        if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
+        if: inputs.enable_image_signing == true && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
@@ -2275,11 +2257,11 @@ jobs:
           REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
           cosign verify "$REF" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-            --certificate-identity "${{ inputs.expected_signing_identity }}" \
+            --certificate-identity "${{ steps.signing_identity.outputs.value }}" \
             >/dev/null
 
   smoke_test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 20
     needs: [detect, build_and_push_images, image_security_scan]
     if: >-
@@ -2304,7 +2286,7 @@ jobs:
           egress-policy: audit
 
       - name: Log in to registry
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
+        uses: ./.github/setup-workflows/registry-login
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2415,7 +2397,7 @@ jobs:
           docker rm -f backend-smoke-test frontend-smoke-test >/dev/null 2>&1 || true
 
   promote_to_latest:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 15
     needs: [detect, build_and_push_images, image_security_scan, smoke_test]
     if: >-
@@ -2445,7 +2427,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@pipeline
+        uses: ./.github/setup-workflows/registry-login
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2481,7 +2463,7 @@ jobs:
           docker buildx imagetools create -t "${REPO}:latest" "${REPO}@${DIGEST}"
 
   release_summary:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     needs:
       [
         detect,
@@ -2768,7 +2750,7 @@ jobs:
           EOF
 
       - name: Check release pipeline success
-        if: inputs.enforce_policies
+        if: inputs.enforce_policies == true
         env:
           PRE_RELEASE_SECURITY_RESULT: ${{ needs.pre_release_security.result }}
           LICENSE_COMPLIANCE_RESULT: ${{ needs.license_compliance.result }}
