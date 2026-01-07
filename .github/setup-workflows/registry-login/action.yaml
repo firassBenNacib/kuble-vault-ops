@@ -1,0 +1,112 @@
+name: "Registry login"
+description: "Authenticate to Docker Hub, GHCR, ECR, or ACR based on inputs"
+inputs:
+  registry_provider:
+    description: "Registry provider (dockerhub, ghcr, ecr, acr)"
+    required: true
+  dockerhub_username:
+    description: "Docker Hub username"
+    required: false
+    default: ""
+  dockerhub_token:
+    description: "Docker Hub token"
+    required: false
+    default: ""
+  ghcr_username:
+    description: "GHCR username"
+    required: false
+    default: ""
+  ghcr_token:
+    description: "GHCR token (optional, defaults to github token)"
+    required: false
+    default: ""
+  github_token:
+    description: "GitHub token for GHCR fallback"
+    required: false
+    default: ""
+  ecr_region:
+    description: "AWS region for ECR"
+    required: false
+    default: ""
+  aws_role_to_assume:
+    description: "AWS role ARN for ECR (OIDC)"
+    required: false
+    default: ""
+  aws_access_key_id:
+    description: "AWS access key id"
+    required: false
+    default: ""
+  aws_secret_access_key:
+    description: "AWS secret access key"
+    required: false
+    default: ""
+  aws_session_token:
+    description: "AWS session token"
+    required: false
+    default: ""
+  acr_login_server:
+    description: "Azure Container Registry login server"
+    required: false
+    default: ""
+  acr_username:
+    description: "Azure Container Registry username"
+    required: false
+    default: ""
+  acr_password:
+    description: "Azure Container Registry password"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Normalize registry provider
+      id: normalize
+      shell: bash
+      run: |
+        set -euo pipefail
+        provider="$(printf '%s' "${{ inputs.registry_provider }}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+        echo "provider=$provider" >> "$GITHUB_OUTPUT"
+
+    - name: Log in to Docker Hub
+      if: steps.normalize.outputs.provider == 'dockerhub'
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      with:
+        registry: docker.io
+        username: ${{ inputs.dockerhub_username }}
+        password: ${{ inputs.dockerhub_token }}
+
+    - name: Log in to GHCR
+      if: steps.normalize.outputs.provider == 'ghcr'
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      with:
+        registry: ghcr.io
+        username: ${{ inputs.ghcr_username }}
+        password: ${{ inputs.ghcr_token != '' && inputs.ghcr_token || inputs.github_token }}
+
+    - name: Configure AWS credentials (ECR, role)
+      if: steps.normalize.outputs.provider == 'ecr' && inputs.aws_role_to_assume != ''
+      uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+      with:
+        role-to-assume: ${{ inputs.aws_role_to_assume }}
+        aws-region: ${{ inputs.ecr_region }}
+
+    - name: Configure AWS credentials (ECR, keys)
+      if: steps.normalize.outputs.provider == 'ecr' && inputs.aws_role_to_assume == ''
+      uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+      with:
+        aws-access-key-id: ${{ inputs.aws_access_key_id }}
+        aws-secret-access-key: ${{ inputs.aws_secret_access_key }}
+        aws-session-token: ${{ inputs.aws_session_token }}
+        aws-region: ${{ inputs.ecr_region }}
+
+    - name: Log in to ECR
+      if: steps.normalize.outputs.provider == 'ecr'
+      uses: aws-actions/amazon-ecr-login@062b18b96a7aff071d4dc91bc00c4c1a7945b076
+
+    - name: Log in to ACR
+      if: steps.normalize.outputs.provider == 'acr'
+      uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      with:
+        registry: ${{ inputs.acr_login_server }}
+        username: ${{ inputs.acr_username }}
+        password: ${{ inputs.acr_password }}

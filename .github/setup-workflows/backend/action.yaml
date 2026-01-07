@@ -1,0 +1,41 @@
+name: "Setup backend"
+description: "Detect build tool, set up JDK, and enable dependency caching"
+inputs:
+  backend_dir:
+    description: "Backend working directory"
+    required: true
+  java_version:
+    description: "JDK version"
+    required: false
+    default: "21"
+outputs:
+  build_tool:
+    description: "Detected build tool (maven, gradle, none)"
+    value: ${{ steps.detect.outputs.build_tool }}
+runs:
+  using: "composite"
+  steps:
+    - name: Detect backend build tool
+      id: detect
+      shell: bash
+      working-directory: ${{ inputs.backend_dir }}
+      run: |
+        set -euo pipefail
+        if [ -f pom.xml ]; then
+          echo "build_tool=maven" >> "$GITHUB_OUTPUT"
+          echo "cache=maven" >> "$GITHUB_OUTPUT"
+        elif [ -f build.gradle ] || [ -f build.gradle.kts ]; then
+          echo "build_tool=gradle" >> "$GITHUB_OUTPUT"
+          echo "cache=gradle" >> "$GITHUB_OUTPUT"
+        else
+          echo "build_tool=none" >> "$GITHUB_OUTPUT"
+          echo "cache=none" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Set up JDK
+      if: steps.detect.outputs.cache != 'none'
+      uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java_version }}
+        cache: ${{ steps.detect.outputs.cache }}

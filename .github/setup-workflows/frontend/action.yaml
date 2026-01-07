@@ -1,0 +1,64 @@
+name: "Setup frontend"
+description: "Detect package manager, set up Node, and install frontend dependencies"
+inputs:
+  frontend_dir:
+    description: "Frontend working directory"
+    required: true
+  node_version:
+    description: "Node.js version"
+    required: false
+    default: "20"
+outputs:
+  pm:
+    description: "Detected package manager (npm, pnpm, yarn)"
+    value: ${{ steps.detect.outputs.pm }}
+  lock:
+    description: "Detected lockfile name"
+    value: ${{ steps.detect.outputs.lock }}
+runs:
+  using: "composite"
+  steps:
+    - name: Detect frontend package manager
+      id: detect
+      shell: bash
+      working-directory: ${{ inputs.frontend_dir }}
+      run: |
+        set -euo pipefail
+        if [ -f pnpm-lock.yaml ]; then
+          echo "pm=pnpm" >> "$GITHUB_OUTPUT"
+          echo "lock=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
+        elif [ -f yarn.lock ]; then
+          echo "pm=yarn" >> "$GITHUB_OUTPUT"
+          echo "lock=yarn.lock" >> "$GITHUB_OUTPUT"
+        else
+          echo "pm=npm" >> "$GITHUB_OUTPUT"
+          echo "lock=package-lock.json" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Set up Node.js
+      uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+      with:
+        node-version: ${{ inputs.node_version }}
+        cache: ${{ steps.detect.outputs.pm }}
+        cache-dependency-path: |
+          ${{ inputs.frontend_dir }}/${{ steps.detect.outputs.lock }}
+
+    - name: Install frontend dependencies
+      shell: bash
+      working-directory: ${{ inputs.frontend_dir }}
+      run: |
+        set -euo pipefail
+        corepack enable || true
+        pm="${{ steps.detect.outputs.pm }}"
+        if [ "$pm" = "pnpm" ]; then
+          pnpm install --frozen-lockfile
+        elif [ "$pm" = "yarn" ]; then
+          yver="$(yarn --version | cut -d. -f1)"
+          if [ "${yver:-1}" -ge 2 ]; then
+            YARN_NODE_LINKER=node-modules yarn install --immutable
+          else
+            yarn install --frozen-lockfile
+          fi
+        else
+          npm ci --prefer-offline --no-audit --no-fund
+        fi

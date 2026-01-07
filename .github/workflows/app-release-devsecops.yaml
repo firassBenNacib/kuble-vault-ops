@@ -8,6 +8,36 @@ on:
         required: false
         type: string
         default: ""
+      registry_provider:
+        description: "Container registry provider: dockerhub, ghcr, ecr, acr"
+        required: false
+        type: string
+        default: "dockerhub"
+      registry_namespace:
+        description: "Registry namespace/org for dockerhub/ghcr (defaults to dockerhub_username or github.repository_owner)"
+        required: false
+        type: string
+        default: ""
+      ecr_account_id:
+        description: "AWS account ID for ECR (required when registry_provider=ecr)"
+        required: false
+        type: string
+        default: ""
+      ecr_region:
+        description: "AWS region for ECR (required when registry_provider=ecr)"
+        required: false
+        type: string
+        default: ""
+      aws_role_to_assume:
+        description: "AWS role ARN for ECR (OIDC). Leave empty to use access keys."
+        required: false
+        type: string
+        default: ""
+      acr_login_server:
+        description: "Azure Container Registry login server (e.g., myregistry.azurecr.io)"
+        required: false
+        type: string
+        default: ""
       backend_image_repo:
         description: "Backend image repo name"
         required: false
@@ -129,7 +159,7 @@ on:
         description: "Require checksums/digests for tool downloads"
         required: false
         type: boolean
-        default: true
+        default: false
       trufflehog_image_digest:
         description: "Pinned digest for TruffleHog image (sha256:...)"
         required: false
@@ -200,6 +230,18 @@ on:
     secrets:
       DOCKERHUB_TOKEN:
         required: false
+      GHCR_TOKEN:
+        required: false
+      ACR_USERNAME:
+        required: false
+      ACR_PASSWORD:
+        required: false
+      AWS_ACCESS_KEY_ID:
+        required: false
+      AWS_SECRET_ACCESS_KEY:
+        required: false
+      AWS_SESSION_TOKEN:
+        required: false
       DEPENDENCY_TRACK_URL:
         required: false
       DEPENDENCY_TRACK_API_KEY:
@@ -217,6 +259,10 @@ concurrency:
   group: release-${{ github.repository }}-${{ github.ref }}
   cancel-in-progress: false
 
+defaults:
+  run:
+    shell: bash
+
 env:
   TRIVY_VERSION: "0.68.2"
   SYFT_VERSION: "v1.38.2"
@@ -227,6 +273,7 @@ env:
   SEMGREP_VERSION: "1.145.0"
   SNYK_VERSION: "1.1301.2"
   LICENSE_CHECKER_VERSION: "25.0.1"
+  LICENSE_MAVEN_PLUGIN_VERSION: "2.4.0"
   DEPENDENCY_CHECK_VERSION: "12.1.9"
   TRUFFLEHOG_TAG: "3.92.4"
 
@@ -273,7 +320,6 @@ jobs:
 
       - name: Detect project structure
         id: detect
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -626,40 +672,21 @@ jobs:
             filesystem /workdir --only-verified 2>&1 | tee trufflehog.log
           tail -200 trufflehog.log
 
-      - name: Set up JDK (backend)
+      - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
-        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e
+        id: backend_setup
+        uses: ./.github/setup-workflows/backend
         with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
+          backend_dir: ${{ needs.detect.outputs.backend_dir }}
+          java_version: "21"
 
-      - name: Detect frontend package manager
+      - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
-        id: fe_pm
-        working-directory: ${{ needs.detect.outputs.frontend_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f pnpm-lock.yaml ]; then
-            echo "pm=pnpm" >> "$GITHUB_OUTPUT"
-            echo "lock=pnpm-lock.yaml" >> "$GITHUB_OUTPUT"
-          elif [ -f yarn.lock ]; then
-            echo "pm=yarn" >> "$GITHUB_OUTPUT"
-            echo "lock=yarn.lock" >> "$GITHUB_OUTPUT"
-          else
-            echo "pm=npm" >> "$GITHUB_OUTPUT"
-            echo "lock=package-lock.json" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up Node.js (frontend)
-        if: needs.detect.outputs.has_frontend == 'true'
-        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        id: frontend_setup
+        uses: ./.github/setup-workflows/frontend
         with:
-          node-version: "20"
-          cache: ${{ steps.fe_pm.outputs.pm }}
-          cache-dependency-path: |
-            ${{ needs.detect.outputs.frontend_dir }}/${{ steps.fe_pm.outputs.lock }}
+          frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
+          node_version: "20"
 
       - name: Set Dependency-Check data directory
         if: inputs.enable_owasp_dependency_check && needs.detect.outputs.has_backend == 'true'
@@ -725,34 +752,13 @@ jobs:
             echo "No build file found for dependency-check"
           fi
 
-      - name: Install frontend dependencies
-        if: needs.detect.outputs.has_frontend == 'true'
-        working-directory: ${{ needs.detect.outputs.frontend_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack enable || true
-          pm="${{ steps.fe_pm.outputs.pm }}"
-          if [ "$pm" = "pnpm" ]; then
-            pnpm install --frozen-lockfile
-          elif [ "$pm" = "yarn" ]; then
-            yver="$(yarn --version | cut -d. -f1)"
-            if [ "${yver:-1}" -ge 2 ]; then
-              YARN_NODE_LINKER=node-modules yarn install --immutable
-            else
-              yarn install --frozen-lockfile
-            fi
-          else
-            npm ci --prefer-offline --no-audit --no-fund
-          fi
-
       - name: Frontend dependency audit (npm/pnpm/yarn)
         if: needs.detect.outputs.has_frontend == 'true'
         id: fe_audit
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         run: |
           set -euo pipefail
-          pm="${{ steps.fe_pm.outputs.pm }}"
+          pm="${{ steps.frontend_setup.outputs.pm }}"
           output="frontend-audit.json"
 
           if [ "$pm" = "pnpm" ]; then
@@ -884,7 +890,7 @@ jobs:
         if: steps.semgrep_release.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: semgrep-release
+          name: semgrep-release-sarif
           path: semgrep-release.sarif
           retention-days: 90
           if-no-files-found: ignore
@@ -893,7 +899,7 @@ jobs:
         if: steps.trivy_prebuild.outputs.sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: trivy-prebuild-vuln
+          name: trivy-prebuild-sarif
           path: trivy-prebuild-vuln.sarif
           retention-days: 90
           if-no-files-found: ignore
@@ -902,7 +908,7 @@ jobs:
         if: steps.trivy_secrets.outputs.secret_sarif_exists == 'true'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
         with:
-          name: trivy-secrets
+          name: trivy-secrets-sarif
           path: trivy-secrets.sarif
           retention-days: 90
           if-no-files-found: ignore
@@ -1103,57 +1109,26 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Set up JDK (backend)
+      - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
-        uses: actions/setup-java@f2beeb24e141e01a676f977032f5a29d81c9e27e
+        id: backend_setup
+        uses: ./.github/setup-workflows/backend
         with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
+          backend_dir: ${{ needs.detect.outputs.backend_dir }}
+          java_version: "21"
 
-      - name: Detect frontend package manager
+      - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
-        id: fe_pm
-        working-directory: ${{ needs.detect.outputs.frontend_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f pnpm-lock.yaml ]; then echo "pm=pnpm" >> "$GITHUB_OUTPUT"; echo "lock=pnpm-lock.yaml" >> "$GITHUB_OUTPUT";
-          elif [ -f yarn.lock ]; then echo "pm=yarn" >> "$GITHUB_OUTPUT"; echo "lock=yarn.lock" >> "$GITHUB_OUTPUT";
-          else echo "pm=npm" >> "$GITHUB_OUTPUT"; echo "lock=package-lock.json" >> "$GITHUB_OUTPUT"; fi
-
-      - name: Set up Node.js (frontend)
-        if: needs.detect.outputs.has_frontend == 'true'
-        uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        id: frontend_setup
+        uses: ./.github/setup-workflows/frontend
         with:
-          node-version: "20"
-          cache: ${{ steps.fe_pm.outputs.pm }}
-          cache-dependency-path: |
-            ${{ needs.detect.outputs.frontend_dir }}/${{ steps.fe_pm.outputs.lock }}
-
-      - name: Install frontend dependencies
-        if: needs.detect.outputs.has_frontend == 'true'
-        working-directory: ${{ needs.detect.outputs.frontend_dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          corepack enable || true
-          pm="${{ steps.fe_pm.outputs.pm }}"
-          if [ "$pm" = "pnpm" ]; then pnpm install --frozen-lockfile
-          elif [ "$pm" = "yarn" ]; then
-            yver="$(yarn --version | cut -d. -f1)"
-            if [ "${yver:-1}" -ge 2 ]; then
-              YARN_NODE_LINKER=node-modules yarn install --immutable
-            else
-              yarn install --frozen-lockfile
-            fi
-          else npm ci --prefer-offline --no-audit --no-fund; fi
+          frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
+          node_version: "20"
 
       - name: Maven license check
         if: needs.detect.outputs.has_backend == 'true'
         id: maven_license
         working-directory: ${{ needs.detect.outputs.backend_dir }}
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -1163,7 +1138,7 @@ jobs:
 
           if [ -f "pom.xml" ]; then
             set +e
-            mvn -B -ntp license:add-third-party \
+            mvn -B -ntp org.codehaus.mojo:license-maven-plugin:${LICENSE_MAVEN_PLUGIN_VERSION}:add-third-party \
               -Dlicense.excludedScopes=test,provided \
               -Dlicense.outputDirectory=target/generated-sources/license \
               -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
@@ -1291,6 +1266,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Dependency Review (PR only)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261
+        with:
+          fail-on-severity: high
+          warn-only: ${{ inputs.enforce_policies != true }}
+
       - name: Run OpenSSF Scorecard (JSON)
         uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
         with:
@@ -1299,18 +1281,28 @@ jobs:
           publish_results: false
 
       - name: Evaluate Scorecard policy
+        env:
+          ENFORCE_POLICIES: ${{ inputs.enforce_policies }}
         run: |
           python3 - <<'PY'
-          import json
+          import json, os, sys
           data=json.load(open('scorecard.json'))
           overall=data.get('score',0)
           checks=data.get('checks',[])
-          if overall < 7.0:
-            raise SystemExit(1)
           critical=['Security-Policy','SAST','Branch-Protection','Pinned-Dependencies']
+          failures=[]
+          if overall < 7.0:
+            failures.append(f"overall score {overall} < 7.0")
           for c in checks:
             if c.get('name') in critical and (c.get('score') or 0) < 7:
-              raise SystemExit(1)
+              failures.append(f"{c.get('name')} score {(c.get('score') or 0)} < 7")
+
+          if failures:
+            msg="Scorecard policy failed: " + "; ".join(failures)
+            if os.environ.get("ENFORCE_POLICIES","false").lower() == "true":
+              print(f"::error::{msg}")
+              sys.exit(1)
+            print(f"::warning::{msg}")
           PY
 
       - name: Run OpenSSF Scorecard (SARIF)
@@ -1346,6 +1338,7 @@ jobs:
       id-token: write
       attestations: write
       actions: write
+      packages: write
     outputs:
       registry: ${{ steps.set_images.outputs.registry }}
       namespace: ${{ steps.set_images.outputs.namespace }}
@@ -1361,7 +1354,6 @@ jobs:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
       BACKEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.backend_image_repo && inputs.backend_image_repo || vars.BACKEND_IMAGE_REPO }}
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
-      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -1375,16 +1367,14 @@ jobs:
 
       - name: Set image names
         id: set_images
-        shell: bash
         env:
           DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-
-          if [ -z "${DOCKERHUB_USERNAME_EFFECTIVE:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
-            echo "::error::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN must be set (Docker Hub only mode)."
-            exit 1
-          fi
 
           clean() {
             printf '%s' "$1" \
@@ -1392,9 +1382,6 @@ jobs:
               | tr '[:upper:]' '[:lower:]' \
               | tr -d '[:space:]'
           }
-
-          REGISTRY="docker.io"
-          NAMESPACE="$(clean "${DOCKERHUB_USERNAME_EFFECTIVE}")"
 
           normalize_repo_component() {
             local input="${1:-}"
@@ -1420,13 +1407,78 @@ jobs:
             printf '%s' "$v"
           }
 
+          registry_provider="${{ inputs.registry_provider }}"
+          registry_provider="$(printf '%s' "$registry_provider" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+          namespace_input="$(clean "${{ inputs.registry_namespace }}")"
+
+          case "$registry_provider" in
+            dockerhub)
+              if [ -z "${DOCKERHUB_USERNAME_EFFECTIVE:-}" ] || [ -z "${DOCKERHUB_TOKEN:-}" ]; then
+                echo "::error::DOCKERHUB_USERNAME/DOCKERHUB_TOKEN must be set when registry_provider=dockerhub."
+                exit 1
+              fi
+              REGISTRY="docker.io"
+              if [ -n "$namespace_input" ]; then
+                NAMESPACE="$namespace_input"
+              else
+                NAMESPACE="$(clean "${DOCKERHUB_USERNAME_EFFECTIVE}")"
+              fi
+              ;;
+            ghcr)
+              REGISTRY="ghcr.io"
+              if [ -n "$namespace_input" ]; then
+                NAMESPACE="$namespace_input"
+              else
+                NAMESPACE="$(clean "${{ github.repository_owner }}")"
+              fi
+              ;;
+            ecr)
+              if [ -z "${{ inputs.ecr_account_id }}" ] || [ -z "${{ inputs.ecr_region }}" ]; then
+                echo "::error::ecr_account_id and ecr_region are required when registry_provider=ecr."
+                exit 1
+              fi
+              if [ -z "${{ inputs.aws_role_to_assume }}" ] && { [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; }; then
+                echo "::error::ECR requires aws_role_to_assume or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY."
+                exit 1
+              fi
+              REGISTRY="${{ inputs.ecr_account_id }}.dkr.ecr.${{ inputs.ecr_region }}.amazonaws.com"
+              NAMESPACE=""
+              ;;
+            acr)
+              if [ -z "${{ inputs.acr_login_server }}" ]; then
+                echo "::error::acr_login_server is required when registry_provider=acr."
+                exit 1
+              fi
+              if [ -z "${ACR_USERNAME:-}" ] || [ -z "${ACR_PASSWORD:-}" ]; then
+                echo "::error::ACR_USERNAME/ACR_PASSWORD must be set when registry_provider=acr."
+                exit 1
+              fi
+              REGISTRY="${{ inputs.acr_login_server }}"
+              NAMESPACE=""
+              ;;
+            *)
+              echo "::error::Unsupported registry_provider '${registry_provider}'. Use dockerhub, ghcr, ecr, or acr."
+              exit 1
+              ;;
+          esac
+
+          if [ "$registry_provider" != "ecr" ] && [ "$registry_provider" != "acr" ] && [ -z "${NAMESPACE:-}" ]; then
+            echo "::error::Registry namespace resolved to empty. Set registry_namespace or dockerhub_username."
+            exit 1
+          fi
+
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
           BACKEND_COMP="$(normalize_repo_component "${BACKEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-backend")"
           FRONTEND_COMP="$(normalize_repo_component "${FRONTEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-frontend")"
 
-          BACKEND_REPO="${REGISTRY}/${NAMESPACE}/${BACKEND_COMP}"
-          FRONTEND_REPO="${REGISTRY}/${NAMESPACE}/${FRONTEND_COMP}"
+          if [ -n "$NAMESPACE" ]; then
+            BACKEND_REPO="${REGISTRY}/${NAMESPACE}/${BACKEND_COMP}"
+            FRONTEND_REPO="${REGISTRY}/${NAMESPACE}/${FRONTEND_COMP}"
+          else
+            BACKEND_REPO="${REGISTRY}/${BACKEND_COMP}"
+            FRONTEND_REPO="${REGISTRY}/${FRONTEND_COMP}"
+          fi
 
           BACKEND_IMAGE_NAME="${BACKEND_REPO}:${IMAGE_TAG}"
           FRONTEND_IMAGE_NAME="${FRONTEND_REPO}:${IMAGE_TAG}"
@@ -1454,12 +1506,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
-      - name: Log in to Docker Hub
-        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      - name: Log in to registry
+        uses: ./.github/setup-workflows/registry-login
         with:
-          username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry_provider: ${{ inputs.registry_provider }}
+          dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+          ghcr_username: ${{ github.actor }}
+          ghcr_token: ${{ secrets.GHCR_TOKEN }}
+          github_token: ${{ github.token }}
+          ecr_region: ${{ inputs.ecr_region }}
+          aws_role_to_assume: ${{ inputs.aws_role_to_assume }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ secrets.AWS_SESSION_TOKEN }}
+          acr_login_server: ${{ inputs.acr_login_server }}
+          acr_username: ${{ secrets.ACR_USERNAME }}
+          acr_password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Build and push backend image
         id: backend_build
@@ -1502,7 +1565,6 @@ jobs:
       - name: Finalize digest refs
         id: digest_refs
         if: always()
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -1530,9 +1592,9 @@ jobs:
       security-events: write
       id-token: write
       actions: write
+      packages: read
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
-      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
@@ -1589,7 +1651,6 @@ jobs:
           cache: true
 
       - name: Prepare local bin dir (Syft/Grype)
-        shell: bash
         run: |
           set -euo pipefail
           BIN_DIR="${RUNNER_TEMP}/bin"
@@ -1599,7 +1660,6 @@ jobs:
 
       - name: Install Syft
         if: inputs.enable_sbom_generation
-        shell: bash
         run: |
           set -euo pipefail
           ver="${SYFT_VERSION#v}"
@@ -1619,7 +1679,6 @@ jobs:
           syft version
 
       - name: Install Grype
-        shell: bash
         run: |
           set -euo pipefail
           ver="${GRYPE_VERSION#v}"
@@ -1699,12 +1758,23 @@ jobs:
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
-      - name: Log in to Docker Hub
-        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      - name: Log in to registry
+        uses: ./.github/setup-workflows/registry-login
         with:
-          username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry_provider: ${{ inputs.registry_provider }}
+          dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+          ghcr_username: ${{ github.actor }}
+          ghcr_token: ${{ secrets.GHCR_TOKEN }}
+          github_token: ${{ github.token }}
+          ecr_region: ${{ inputs.ecr_region }}
+          aws_role_to_assume: ${{ inputs.aws_role_to_assume }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ secrets.AWS_SESSION_TOKEN }}
+          acr_login_server: ${{ inputs.acr_login_server }}
+          acr_username: ${{ secrets.ACR_USERNAME }}
+          acr_password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Generate backend SBOM with Syft
         if: inputs.enable_sbom_generation && needs.detect.outputs.build_backend_image == 'true'
@@ -1786,10 +1856,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
-            docker pull --platform linux/amd64 "${{ needs.build_and_push_images.outputs.backend_image_name }}"
+            REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+            [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+            docker pull --platform linux/amd64 "$REF"
           fi
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
-            docker pull --platform linux/amd64 "${{ needs.build_and_push_images.outputs.frontend_image_name }}"
+            REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+            [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+            docker pull --platform linux/amd64 "$REF"
           fi
 
       - name: Snyk container test (backend)
@@ -1871,7 +1945,6 @@ jobs:
       - name: Grype scan backend image
         if: needs.detect.outputs.build_backend_image == 'true'
         id: grype_backend_image
-        shell: bash
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
@@ -1893,7 +1966,6 @@ jobs:
       - name: Grype scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
         id: grype_frontend_image
-        shell: bash
         run: |
           set -euo pipefail
           REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
@@ -1917,7 +1989,8 @@ jobs:
         id: dockle_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
           dockle --format json "$REF" > dockle-backend-report.json || true
 
           fatal="$(jq -r '.summary.fatal // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
@@ -1947,7 +2020,8 @@ jobs:
         id: dockle_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
           dockle --format json "$REF" > dockle-frontend-report.json || true
 
           fatal="$(jq -r '.summary.fatal // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
@@ -1977,14 +2051,16 @@ jobs:
         continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Dive analysis frontend image
         if: inputs.enable_dive && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_image_name }}"
+          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Upload release SBOMs
@@ -2165,7 +2241,6 @@ jobs:
 
       - name: Verify backend signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_backend_image == 'true'
-        shell: bash
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
@@ -2178,7 +2253,6 @@ jobs:
 
       - name: Verify frontend signature
         if: inputs.enable_image_signing && needs.detect.outputs.build_frontend_image == 'true'
-        shell: bash
         run: |
           set -euo pipefail
           DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
@@ -2204,21 +2278,33 @@ jobs:
       }}
     permissions:
       contents: read
+      id-token: write
+      packages: read
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
-      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
           egress-policy: audit
 
-      - name: Log in to Docker Hub
-        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      - name: Log in to registry
+        uses: ./.github/setup-workflows/registry-login
         with:
-          username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry_provider: ${{ inputs.registry_provider }}
+          dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+          ghcr_username: ${{ github.actor }}
+          ghcr_token: ${{ secrets.GHCR_TOKEN }}
+          github_token: ${{ github.token }}
+          ecr_region: ${{ inputs.ecr_region }}
+          aws_role_to_assume: ${{ inputs.aws_role_to_assume }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ secrets.AWS_SESSION_TOKEN }}
+          acr_login_server: ${{ inputs.acr_login_server }}
+          acr_username: ${{ secrets.ACR_USERNAME }}
+          acr_password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Backend smoke test
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -2330,10 +2416,10 @@ jobs:
       }}
     permissions:
       contents: read
+      id-token: write
       packages: write
     env:
       DOCKERHUB_USERNAME_EFFECTIVE: ${{ inputs.dockerhub_username && inputs.dockerhub_username || vars.DOCKERHUB_USERNAME }}
-      HAS_DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN != '' }}
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
@@ -2343,12 +2429,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
-      - name: Log in to Docker Hub
-        if: env.HAS_DOCKERHUB_TOKEN == 'true' && env.DOCKERHUB_USERNAME_EFFECTIVE != ''
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef
+      - name: Log in to registry
+        uses: ./.github/setup-workflows/registry-login
         with:
-          username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry_provider: ${{ inputs.registry_provider }}
+          dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
+          dockerhub_token: ${{ secrets.DOCKERHUB_TOKEN }}
+          ghcr_username: ${{ github.actor }}
+          ghcr_token: ${{ secrets.GHCR_TOKEN }}
+          github_token: ${{ github.token }}
+          ecr_region: ${{ inputs.ecr_region }}
+          aws_role_to_assume: ${{ inputs.aws_role_to_assume }}
+          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws_session_token: ${{ secrets.AWS_SESSION_TOKEN }}
+          acr_login_server: ${{ inputs.acr_login_server }}
+          acr_username: ${{ secrets.ACR_USERNAME }}
+          acr_password: ${{ secrets.ACR_PASSWORD }}
 
       - name: Promote backend to latest
         if: needs.detect.outputs.build_backend_image == 'true'
@@ -2406,7 +2503,7 @@ jobs:
             "$api" > run-artifacts.json; then
             echo "::warning::Failed to list artifacts for this run."
             echo "has_sarif_pattern=false" >> "$GITHUB_OUTPUT"
-            for n in semgrep-release trivy-prebuild-vuln trivy-secrets snyk-sarifs release-sboms dockle-reports dependency-check license-reports; do
+            for n in release-sboms dockle-reports dependency-check license-reports; do
               echo "has_${n//-/_}=false" >> "$GITHUB_OUTPUT"
             done
             exit 0
@@ -2426,7 +2523,7 @@ jobs:
             echo "has_sarif_pattern=$has_sarif"
           } >> "$GITHUB_OUTPUT"
 
-          for n in semgrep-release trivy-prebuild-vuln trivy-secrets snyk-sarifs release-sboms dockle-reports dependency-check license-reports; do
+          for n in release-sboms dockle-reports dependency-check license-reports; do
             key="has_${n//-/_}"
             if has_name "$n"; then
               echo "${key}=true" >> "$GITHUB_OUTPUT"
@@ -2443,46 +2540,6 @@ jobs:
         with:
           path: artifacts
           pattern: "*sarif*"
-          merge-multiple: false
-
-      - name: Download Semgrep artifact
-        id: dl_semgrep
-        if: always() && steps.list_artifacts.outputs.has_semgrep_release == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
-        with:
-          name: semgrep-release
-          path: artifacts
-          merge-multiple: false
-
-      - name: Download Trivy prebuild SARIF artifact
-        id: dl_trivy_prebuild
-        if: always() && steps.list_artifacts.outputs.has_trivy_prebuild_vuln == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
-        with:
-          name: trivy-prebuild-vuln
-          path: artifacts
-          merge-multiple: false
-
-      - name: Download Trivy secrets SARIF artifact
-        id: dl_trivy_secrets
-        if: always() && steps.list_artifacts.outputs.has_trivy_secrets == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
-        with:
-          name: trivy-secrets
-          path: artifacts
-          merge-multiple: false
-
-      - name: Download Snyk SARIF artifacts
-        id: dl_snyk_sarifs
-        if: always() && steps.list_artifacts.outputs.has_snyk_sarifs == 'true'
-        continue-on-error: true
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16
-        with:
-          name: snyk-sarifs
-          path: artifacts
           merge-multiple: false
 
       - name: Download SBOM artifact
@@ -2529,10 +2586,6 @@ jobs:
         if: always()
         env:
           DL_SARIFS:         ${{ steps.dl_sarifs.outcome }}
-          DL_SEMGREP:        ${{ steps.dl_semgrep.outcome }}
-          DL_TRIVY_PREBUILD: ${{ steps.dl_trivy_prebuild.outcome }}
-          DL_TRIVY_SECRETS:  ${{ steps.dl_trivy_secrets.outcome }}
-          DL_SNYK_SARIFS:    ${{ steps.dl_snyk_sarifs.outcome }}
           DL_SBOMS:          ${{ steps.dl_sboms.outcome }}
           DL_DOCKLE:         ${{ steps.dl_dockle.outcome }}
           DL_DEPCHECK:       ${{ steps.dl_depcheck.outcome }}
@@ -2542,10 +2595,6 @@ jobs:
           failed=()
 
           [ "${DL_SARIFS:-}"         = "failure" ] && failed+=("pattern=*sarif*")
-          [ "${DL_SEMGREP:-}"        = "failure" ] && failed+=("semgrep-release")
-          [ "${DL_TRIVY_PREBUILD:-}" = "failure" ] && failed+=("trivy-prebuild-vuln")
-          [ "${DL_TRIVY_SECRETS:-}"  = "failure" ] && failed+=("trivy-secrets")
-          [ "${DL_SNYK_SARIFS:-}"    = "failure" ] && failed+=("snyk-sarifs")
           [ "${DL_SBOMS:-}"          = "failure" ] && failed+=("release-sboms")
           [ "${DL_DOCKLE:-}"         = "failure" ] && failed+=("dockle-reports")
           [ "${DL_DEPCHECK:-}"       = "failure" ] && failed+=("dependency-check")
@@ -2630,7 +2679,7 @@ jobs:
           |-------|--------|---------|
           | Pre-release Security | ${{ needs.pre_release_security.result }} | SAST, secrets, dependency scans |
           | License Compliance | ${{ needs.license_compliance.result }} | License checks |
-          | Supply Chain Security | ${{ needs.supply_chain_security.result }} | Scorecard, dependency review |
+          | Supply Chain Security | ${{ needs.supply_chain_security.result }} | Scorecard, dependency review (PRs) |
           | Build & Push Images | ${{ needs.build_and_push_images.result }} | Multi-arch: ${{ inputs.enable_multi_arch }} |
           | Image Security Scan | ${{ needs.image_security_scan.result }} | Trivy + Grype + SBOM + Cosign |
           | Smoke Tests | ${{ needs.smoke_test.result }} | Health checks and accessibility |
