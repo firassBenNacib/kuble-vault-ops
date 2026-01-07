@@ -310,10 +310,16 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
-          fetch_depth: 0
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Detect project structure
         id: detect
@@ -500,10 +506,16 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_SOCKET_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN != '' }}
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
-          fetch_depth: 0
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Validate security tool secrets
         if: always()
@@ -666,7 +678,7 @@ jobs:
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: ./.github/setup-workflows/backend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -674,7 +686,7 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: ./.github/setup-workflows/frontend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
@@ -1096,13 +1108,20 @@ jobs:
       contents: read
       actions: write
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
 
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
         id: backend_setup
-        uses: ./.github/setup-workflows/backend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/backend@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           backend_dir: ${{ needs.detect.outputs.backend_dir }}
           java_version: "21"
@@ -1110,7 +1129,7 @@ jobs:
       - name: Setup frontend dependencies
         if: needs.detect.outputs.has_frontend == 'true'
         id: frontend_setup
-        uses: ./.github/setup-workflows/frontend
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/frontend@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
@@ -1260,10 +1279,16 @@ jobs:
       pull-requests: read
       checks: read
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
         with:
-          fetch_depth: 0
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Dependency Review (PR only)
         if: github.event_name == 'pull_request'
@@ -1354,8 +1379,15 @@ jobs:
       BACKEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.backend_image_repo && inputs.backend_image_repo || vars.BACKEND_IMAGE_REPO }}
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
 
       - name: Set image names
         id: set_images
@@ -1499,7 +1531,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -1590,8 +1622,15 @@ jobs:
       HAS_SNYK_TOKEN: ${{ secrets.SNYK_TOKEN != '' }}
       HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
-      - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+      - name: Harden Runner
+        uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76
+        with:
+          egress-policy: audit
+
+      - name: Checkout repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+        with:
+          persist-credentials: false
 
       - name: Validate security tool secrets
         if: always()
@@ -1756,7 +1795,7 @@ jobs:
           snyk --version
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2286,7 +2325,7 @@ jobs:
           egress-policy: audit
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
@@ -2427,7 +2466,7 @@ jobs:
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
       - name: Log in to registry
-        uses: ./.github/setup-workflows/registry-login
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/registry-login@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           registry_provider: ${{ inputs.registry_provider }}
           dockerhub_username: ${{ env.DOCKERHUB_USERNAME_EFFECTIVE }}
