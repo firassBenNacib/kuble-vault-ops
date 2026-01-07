@@ -331,7 +331,7 @@ jobs:
       contents: read
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           fetch_depth: 0
@@ -572,7 +572,7 @@ jobs:
       HAS_SOCKET_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN != '' }}
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           fetch_depth: 0
@@ -1180,7 +1180,7 @@ jobs:
       actions: write
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           persist_credentials: false
@@ -1347,7 +1347,7 @@ jobs:
       checks: read
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           fetch_depth: 0
@@ -1443,7 +1443,7 @@ jobs:
       FRONTEND_IMAGE_REPO_EFFECTIVE: ${{ inputs.frontend_image_repo && inputs.frontend_image_repo || vars.FRONTEND_IMAGE_REPO }}
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           persist_credentials: false
@@ -1682,7 +1682,7 @@ jobs:
       HAS_DEPENDENCY_TRACK: ${{ secrets.DEPENDENCY_TRACK_URL != '' && secrets.DEPENDENCY_TRACK_API_KEY != '' }}
     steps:
       - name: Harden runner and checkout
-        uses: ./.github/setup-workflows/harden-checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
         with:
           egress_policy: audit
           persist_credentials: false
