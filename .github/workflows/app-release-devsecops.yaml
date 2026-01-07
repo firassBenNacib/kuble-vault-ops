@@ -1919,6 +1919,9 @@ jobs:
           info="$(jq -r '.summary.info // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
 
           echo "fatal=${fatal} warn=${warn} info=${info}"
+          echo "::group::Dockle backend findings"
+          jq -r '.details[]? | "\(.code) \(.level) \(.title) \(.message)"' dockle-backend-report.json 2>/dev/null || true
+          echo "::endgroup::"
 
           rc=0
           case "${DOCKLE_SEVERITY}" in
@@ -1946,6 +1949,9 @@ jobs:
           info="$(jq -r '.summary.info // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
 
           echo "fatal=${fatal} warn=${warn} info=${info}"
+          echo "::group::Dockle frontend findings"
+          jq -r '.details[]? | "\(.code) \(.level) \(.title) \(.message)"' dockle-frontend-report.json 2>/dev/null || true
+          echo "::endgroup::"
 
           rc=0
           case "${DOCKLE_SEVERITY}" in
