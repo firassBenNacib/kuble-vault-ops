@@ -68,7 +68,7 @@ on:
         description: "Enable local container image builds + scans"
         required: false
         type: boolean
-        default: false
+        default: true
       enable_sbom_generation:
         description: "Enable SBOM generation for local images"
         required: false
@@ -347,6 +347,11 @@ jobs:
           branch_policy="${{ inputs.branch_policy }}"
           branch_allowlist="${{ inputs.branch_allowlist }}"
           ref_name="${{ github.ref_name }}"
+          if [ "${{ inputs.is_pr }}" = "true" ] || [ "${{ inputs.caller_event_name }}" = "pull_request" ] || [ "${{ inputs.caller_event_name }}" = "pull_request_target" ]; then
+            if [ -n "${{ github.base_ref }}" ]; then
+              ref_name="${{ github.base_ref }}"
+            fi
+          fi
           default_branch="${{ github.event.repository.default_branch }}"
           branch_allowed=false
           branch_reason="policy=${branch_policy}"
