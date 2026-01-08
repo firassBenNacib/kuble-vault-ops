@@ -1,0 +1,617 @@
+name: DAST Pipeline (ZAP, Nuclei)
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "Target base URL for DAST scan"
+        required: false
+        type: string
+        default: ""
+      scan_type:
+        description: "Type of scan to perform: baseline, full, api"
+        required: false
+        type: string
+        default: "baseline"
+      enable_zap:
+        description: "Enable OWASP ZAP scan"
+        required: false
+        type: boolean
+        default: true
+      enable_nuclei:
+        description: "Enable Nuclei scan"
+        required: false
+        type: boolean
+        default: true
+      enable_code_scanning:
+        description: "Enable SARIF upload"
+        required: false
+        type: boolean
+        default: false
+      enforce_policies:
+        description: "Fail workflow when policy thresholds are exceeded"
+        required: false
+        type: boolean
+        default: true
+      branch_policy:
+        description: "Branch policy for running the pipeline: any, default, allowlist"
+        required: false
+        type: string
+        default: "any"
+      branch_allowlist:
+        description: "Comma-separated branch names or globs"
+        required: false
+        type: string
+        default: ""
+      zap_image_digest:
+        description: "Pinned digest for ghcr.io/zaproxy/zaproxy, sha256:..."
+        required: false
+        type: string
+        default: "sha256:8e79e827afb9e8bdba390c829eb3062062cdb407570559e2ddebd49130c00a59"
+    secrets:
+      DAST_TARGET_URL:
+        required: false
+      ZAP_AUTH_USERNAME:
+        required: false
+      ZAP_AUTH_PASSWORD:
+        required: false
+
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Target base URL for DAST scan"
+        required: false
+        type: string
+      scan_type:
+        description: "Type of scan to perform"
+        required: false
+        type: choice
+        default: "baseline"
+        options:
+          - baseline
+          - full
+          - api
+      enable_zap:
+        description: "Enable OWASP ZAP scan"
+        required: false
+        type: boolean
+        default: true
+      enable_nuclei:
+        description: "Enable Nuclei scan"
+        required: false
+        type: boolean
+        default: true
+      enable_code_scanning:
+        description: "Enable SARIF upload"
+        required: false
+        type: boolean
+        default: false
+      enforce_policies:
+        description: "Fail workflow when policy thresholds are exceeded"
+        required: false
+        type: boolean
+        default: true
+      branch_policy:
+        description: "Branch policy for running the pipeline: any, default, allowlist"
+        required: false
+        type: string
+        default: "any"
+      branch_allowlist:
+        description: "Comma-separated branch names or globs"
+        required: false
+        type: string
+        default: ""
+
+  schedule:
+    - cron: "0 2 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dast-${{ github.repository }}-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  DAST_TARGET_URL: ${{ inputs.target != '' && inputs.target || secrets.DAST_TARGET_URL }}
+  SCAN_TYPE: ${{ inputs.scan_type != '' && inputs.scan_type || 'baseline' }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-22.04
+    outputs:
+      branch_allowed: ${{ steps.detect.outputs.branch_allowed }}
+      branch_policy: ${{ steps.detect.outputs.branch_policy }}
+      branch_reason: ${{ steps.detect.outputs.branch_reason }}
+      enable_zap: ${{ steps.detect.outputs.enable_zap }}
+      enable_nuclei: ${{ steps.detect.outputs.enable_nuclei }}
+      enable_code_scanning: ${{ steps.detect.outputs.enable_code_scanning }}
+      enforce_policies: ${{ steps.detect.outputs.enforce_policies }}
+      scan_type: ${{ steps.detect.outputs.scan_type }}
+      target_url: ${{ steps.detect.outputs.target_url }}
+      zap_image_ref: ${{ steps.detect.outputs.zap_image_ref }}
+    permissions:
+      contents: read
+    steps:
+      - name: Harden runner and checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
+        with:
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
+
+      - name: Resolve DAST inputs
+        id: detect
+        env:
+          DAST_TARGET_URL: ${{ env.DAST_TARGET_URL }}
+        run: |
+          set -euo pipefail
+
+          enable_zap="${{ inputs.enable_zap }}"
+          enable_nuclei="${{ inputs.enable_nuclei }}"
+          enable_code_scanning="${{ inputs.enable_code_scanning }}"
+          enforce_policies="${{ inputs.enforce_policies }}"
+
+          if [ -z "$enable_zap" ]; then enable_zap=true; fi
+          if [ -z "$enable_nuclei" ]; then enable_nuclei=true; fi
+          if [ -z "$enable_code_scanning" ]; then enable_code_scanning=false; fi
+          if [ -z "$enforce_policies" ]; then enforce_policies=true; fi
+
+          scan_type="${{ inputs.scan_type }}"
+          if [ -z "$scan_type" ]; then scan_type="baseline"; fi
+          case "$scan_type" in
+            baseline|full|api) : ;;
+            *)
+              echo "::error::Invalid scan_type '$scan_type'. Use baseline, full, or api."
+              exit 1
+              ;;
+          esac
+
+          target_url="${DAST_TARGET_URL:-}"
+
+          zap_digest="${{ inputs.zap_image_digest }}"
+          zap_image_ref=""
+          if [ -n "$zap_digest" ]; then
+            zap_image_ref="ghcr.io/zaproxy/zaproxy@${zap_digest}"
+          elif [ "$enforce_policies" = "true" ]; then
+            echo "::error::zap_image_digest is required when enforce_policies=true"
+            exit 1
+          else
+            echo "::warning::zap_image_digest not provided; using ghcr.io/zaproxy/zaproxy:stable"
+            zap_image_ref="ghcr.io/zaproxy/zaproxy:stable"
+          fi
+
+          branch_policy="${{ inputs.branch_policy }}"
+          branch_allowlist="${{ inputs.branch_allowlist }}"
+          ref_name="${{ github.ref_name }}"
+          if [ "${{ github.event_name }}" = "pull_request" ] && [ -n "${{ github.base_ref }}" ]; then
+            ref_name="${{ github.base_ref }}"
+          fi
+          default_branch="${{ github.event.repository.default_branch }}"
+          branch_allowed=false
+          branch_reason="policy=${branch_policy}"
+
+          case "$branch_policy" in
+            ""|any)
+              branch_allowed=true
+              branch_reason="policy=any"
+              ;;
+            default)
+              if [ "$ref_name" = "$default_branch" ]; then
+                branch_allowed=true
+                branch_reason="policy=default (match ${default_branch})"
+              else
+                branch_allowed=false
+                branch_reason="policy=default (current=${ref_name}, default=${default_branch})"
+              fi
+              ;;
+            allowlist)
+              branch_allowed=false
+              branch_reason="policy=allowlist (no match)"
+              if [ -n "$branch_allowlist" ]; then
+                IFS=',' read -r -a patterns <<< "$branch_allowlist"
+                for pat in "${patterns[@]}"; do
+                  pat="${pat//[[:space:]]/}"
+                  [ -z "$pat" ] && continue
+                  case "$ref_name" in
+                    $pat)
+                      branch_allowed=true
+                      branch_reason="policy=allowlist (match ${pat})"
+                      break
+                      ;;
+                  esac
+                done
+              else
+                branch_reason="policy=allowlist (empty list)"
+              fi
+              ;;
+            *)
+              echo "::error::Unknown branch_policy '${branch_policy}'. Use any, default, or allowlist."
+              exit 1
+              ;;
+          esac
+
+          {
+            echo "enable_zap=$enable_zap"
+            echo "enable_nuclei=$enable_nuclei"
+            echo "enable_code_scanning=$enable_code_scanning"
+            echo "enforce_policies=$enforce_policies"
+            echo "scan_type=$scan_type"
+            echo "target_url=$target_url"
+            echo "zap_image_ref=$zap_image_ref"
+            echo "branch_allowed=$branch_allowed"
+            echo "branch_policy=$branch_policy"
+            echo "branch_reason=$branch_reason"
+          } >> "$GITHUB_OUTPUT"
+
+  zap_scan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    needs: [detect]
+    if: needs.detect.outputs.branch_allowed == 'true' && needs.detect.outputs.enable_zap == 'true'
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      DAST_TARGET_URL: ${{ needs.detect.outputs.target_url }}
+      SCAN_TYPE: ${{ needs.detect.outputs.scan_type }}
+      ZAP_IMAGE_REF: ${{ needs.detect.outputs.zap_image_ref }}
+      ENFORCE_POLICIES: ${{ needs.detect.outputs.enforce_policies }}
+    steps:
+      - name: Harden runner and checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
+        with:
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
+
+      - name: Validate target URL
+        run: |
+          if [ -z "${DAST_TARGET_URL}" ]; then
+            msg="DAST target URL is not set (inputs.target or secrets.DAST_TARGET_URL)"
+            if [ "${ENFORCE_POLICIES}" = "true" ]; then
+              echo "::error::${msg}"
+              exit 1
+            fi
+            echo "::warning::${msg}"
+            exit 0
+          fi
+
+          if ! curl -s --head --max-time 10 "${DAST_TARGET_URL}" > /dev/null 2>&1; then
+            msg="Target URL ${DAST_TARGET_URL} is not reachable"
+            if [ "${ENFORCE_POLICIES}" = "true" ]; then
+              echo "::error::${msg}"
+              exit 1
+            fi
+            echo "::warning::${msg}"
+            exit 0
+          fi
+
+          echo "Target URL ${DAST_TARGET_URL} is reachable"
+
+      - name: Create ZAP configuration
+        run: |
+          mkdir -p zap-config
+
+          cat > zap-config/rules.tsv <<'EOF'
+          10110	IGNORE	(Cross-Domain JavaScript Source File Inclusion)
+          10015	IGNORE	(Incomplete or No Cache-control)
+          EOF
+
+          if [ -n "${{ secrets.ZAP_AUTH_USERNAME }}" ]; then
+            cat > zap-config/auth.json <<'EOF'
+          {
+            "authentication": {
+              "method": "form",
+              "loginUrl": "${DAST_TARGET_URL}/login",
+              "usernameField": "username",
+              "passwordField": "password",
+              "username": "${{ secrets.ZAP_AUTH_USERNAME }}",
+              "password": "${{ secrets.ZAP_AUTH_PASSWORD }}"
+            }
+          }
+          EOF
+          fi
+
+      - name: Run OWASP ZAP baseline scan
+        if: env.SCAN_TYPE == 'baseline'
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk/:rw \
+            -v $(pwd)/zap-config:/zap/config:ro \
+            -t "${ZAP_IMAGE_REF}" \
+            zap-baseline.py \
+            -t "${DAST_TARGET_URL}" \
+            -J zap-report.json \
+            -w zap-report.md \
+            -r zap-report.html \
+            -x zap-report.xml \
+            -m 5 \
+            -a \
+            -c /zap/config/rules.tsv \
+            -I || true
+
+      - name: Run OWASP ZAP full scan
+        if: env.SCAN_TYPE == 'full'
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk/:rw \
+            -v $(pwd)/zap-config:/zap/config:ro \
+            -t "${ZAP_IMAGE_REF}" \
+            zap-full-scan.py \
+            -t "${DAST_TARGET_URL}" \
+            -J zap-report.json \
+            -w zap-report.md \
+            -r zap-report.html \
+            -x zap-report.xml \
+            -m 10 \
+            -c /zap/config/rules.tsv \
+            -I || true
+
+      - name: Run OWASP ZAP API scan
+        if: env.SCAN_TYPE == 'api'
+        run: |
+          docker run --rm \
+            -v $(pwd):/zap/wrk/:rw \
+            -v $(pwd)/zap-config:/zap/config:ro \
+            -t "${ZAP_IMAGE_REF}" \
+            zap-api-scan.py \
+            -t "${DAST_TARGET_URL}/api/openapi.json" \
+            -f openapi \
+            -J zap-report.json \
+            -w zap-report.md \
+            -r zap-report.html \
+            -x zap-report.xml \
+            -c /zap/config/rules.tsv \
+            -I || true
+
+      - name: Convert ZAP JSON to SARIF
+        if: always() && hashFiles('zap-report.json') != ''
+        run: |
+          cat > convert_zap_to_sarif.py <<'PYTHON'
+          import json
+
+          def convert_zap_to_sarif(zap_file, sarif_file):
+              with open(zap_file, 'r') as f:
+                  zap_data = json.load(f)
+
+              sarif = {
+                  "$schema": "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json",
+                  "version": "2.1.0",
+                  "runs": [{
+                      "tool": {
+                          "driver": {
+                              "name": "OWASP ZAP",
+                              "version": zap_data.get("@version", "unknown"),
+                              "informationUri": "https://www.zaproxy.org/"
+                          }
+                      },
+                      "results": []
+                  }]
+              }
+
+              for site in zap_data.get("site", []):
+                  for alert in site.get("alerts", []):
+                      for instance in alert.get("instances", []):
+                          result = {
+                              "ruleId": str(alert.get("pluginid", "")),
+                              "level": map_risk_to_level(alert.get("riskcode", "0")),
+                              "message": {
+                                  "text": alert.get("name", "Unknown")
+                              },
+                              "locations": [{
+                                  "physicalLocation": {
+                                      "artifactLocation": {
+                                          "uri": instance.get("uri", "")
+                                      }
+                                  }
+                              }]
+                          }
+                          sarif["runs"][0]["results"].append(result)
+
+              with open(sarif_file, 'w') as f:
+                  json.dump(sarif, f, indent=2)
+
+          def map_risk_to_level(riskcode):
+              mapping = {"0": "note", "1": "note", "2": "warning", "3": "error"}
+              return mapping.get(str(riskcode), "note")
+
+          if __name__ == "__main__":
+              convert_zap_to_sarif("zap-report.json", "zap-report.sarif")
+          PYTHON
+
+          python3 convert_zap_to_sarif.py || echo "SARIF conversion failed"
+
+      - name: Verify ZAP artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for f in zap-report.json zap-report.md zap-report.html zap-report.xml; do
+            if [ ! -s "$f" ]; then
+              echo "::warning::Missing or empty ZAP report: $f"
+              missing=1
+            fi
+          done
+
+          if [ "${{ needs.detect.outputs.enable_code_scanning }}" = "true" ] && [ ! -s "zap-report.sarif" ]; then
+            echo "::warning::Missing or empty ZAP SARIF report"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ] && [ "${ENFORCE_POLICIES}" = "true" ]; then
+            echo "::error::ZAP artifacts are incomplete"
+            exit 1
+          fi
+
+      - name: Parse ZAP results
+        if: always() && hashFiles('zap-report.json') != ''
+        run: |
+          HIGH_RISK=$(jq '[.site[].alerts[] | select(.riskcode=="3")] | length' zap-report.json || echo 0)
+          MEDIUM_RISK=$(jq '[.site[].alerts[] | select(.riskcode=="2")] | length' zap-report.json || echo 0)
+          LOW_RISK=$(jq '[.site[].alerts[] | select(.riskcode=="1")] | length' zap-report.json || echo 0)
+
+          echo "ZAP Scan Results:"
+          echo "High Risk Issues: $HIGH_RISK"
+          echo "Medium Risk Issues: $MEDIUM_RISK"
+          echo "Low Risk Issues: $LOW_RISK"
+
+          if [ "$HIGH_RISK" -gt 0 ] && [ "${ENFORCE_POLICIES}" = "true" ]; then
+            echo "::error::Found $HIGH_RISK high-risk vulnerabilities"
+            exit 1
+          fi
+
+      - name: Upload ZAP reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: zap-dast-reports-${{ github.run_number }}
+          path: |
+            zap-report.json
+            zap-report.md
+            zap-report.html
+            zap-report.xml
+            zap-report.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload ZAP SARIF to code scanning
+        if: needs.detect.outputs.enable_code_scanning == 'true' && hashFiles('zap-report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: zap-report.sarif
+          category: zap-dast
+        continue-on-error: true
+
+  nuclei_scan:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    needs: [detect]
+    if: needs.detect.outputs.branch_allowed == 'true' && needs.detect.outputs.enable_nuclei == 'true'
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      DAST_TARGET_URL: ${{ needs.detect.outputs.target_url }}
+      ENFORCE_POLICIES: ${{ needs.detect.outputs.enforce_policies }}
+    steps:
+      - name: Harden runner and checkout
+        uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
+        with:
+          egress_policy: audit
+          fetch_depth: 0
+          persist_credentials: false
+
+      - name: Validate target URL
+        run: |
+          if [ -z "${DAST_TARGET_URL}" ]; then
+            msg="DAST target URL is not set (inputs.target or secrets.DAST_TARGET_URL)"
+            if [ "${ENFORCE_POLICIES}" = "true" ]; then
+              echo "::error::${msg}"
+              exit 1
+            fi
+            echo "::warning::${msg}"
+            exit 0
+          fi
+
+      - name: Run Nuclei scan
+        uses: projectdiscovery/nuclei-action@128f7284c2a836b485e292b9080dbc6175103758
+        with:
+          target: ${{ env.DAST_TARGET_URL }}
+          sarif-export: nuclei-report.sarif
+          markdown-export: nuclei-report.md
+          output: nuclei-report.txt
+          flags: "-severity critical,high,medium"
+
+      - name: Verify Nuclei artifacts
+        if: always()
+        run: |
+          set -euo pipefail
+          missing=0
+
+          for f in nuclei-report.txt nuclei-report.md; do
+            if [ ! -s "$f" ]; then
+              echo "::warning::Missing or empty Nuclei report: $f"
+              missing=1
+            fi
+          done
+
+          if [ "${{ needs.detect.outputs.enable_code_scanning }}" = "true" ] && [ ! -s "nuclei-report.sarif" ]; then
+            echo "::warning::Missing or empty Nuclei SARIF report"
+            missing=1
+          fi
+
+          if [ "$missing" -ne 0 ] && [ "${ENFORCE_POLICIES}" = "true" ]; then
+            echo "::error::Nuclei artifacts are incomplete"
+            exit 1
+          fi
+
+      - name: Upload Nuclei reports
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f
+        with:
+          name: nuclei-reports-${{ github.run_number }}
+          path: |
+            nuclei-report.txt
+            nuclei-report.md
+            nuclei-report.sarif
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Upload Nuclei SARIF to code scanning
+        if: needs.detect.outputs.enable_code_scanning == 'true' && hashFiles('nuclei-report.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: nuclei-report.sarif
+          category: nuclei-dast
+        continue-on-error: true
+
+  dast_summary:
+    runs-on: ubuntu-22.04
+    needs: [detect, zap_scan, nuclei_scan]
+    if: always()
+    permissions:
+      contents: read
+    steps:
+      - name: Generate DAST summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY <<'EOF'
+          # DAST Security Scan Results
+
+          ## Scan Status
+
+          | Scanner | Status | Scan Type |
+          |---------|--------|-----------|
+          | OWASP ZAP | ${{ needs.zap_scan.result }} | ${{ needs.detect.outputs.scan_type }} |
+          | Nuclei | ${{ needs.nuclei_scan.result }} | Template-based |
+
+          ## Target Information
+
+          - Target URL: ${{ needs.detect.outputs.target_url || 'Not set' }}
+          - Triggered: ${{ github.event_name }}
+          - Branch policy: ${{ needs.detect.outputs.branch_policy }}
+          - Branch policy result: ${{ needs.detect.outputs.branch_reason }}
+
+          ## Toggles
+
+          - ZAP: ${{ needs.detect.outputs.enable_zap }}
+          - Nuclei: ${{ needs.detect.outputs.enable_nuclei }}
+          - Code Scanning: ${{ needs.detect.outputs.enable_code_scanning }}
+          - Policy Enforcement: ${{ needs.detect.outputs.enforce_policies }}
+          EOF
+
+      - name: Check DAST pipeline success
+        if: needs.detect.outputs.enforce_policies == 'true'
+        env:
+          ZAP_RESULT: ${{ needs.zap_scan.result }}
+          NUCLEI_RESULT: ${{ needs.nuclei_scan.result }}
+        run: |
+          failures=0
+          if [ "${ZAP_RESULT}" = "failure" ]; then failures=1; fi
+          if [ "${NUCLEI_RESULT}" = "failure" ]; then failures=1; fi
+          if [ "$failures" -ne 0 ]; then exit 1; fi
