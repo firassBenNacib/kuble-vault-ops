@@ -226,10 +226,15 @@ on:
         type: string
         default: "sha512-FUTV/2WStY0GyvJROvxKPa2A3FzgVNIUB8rR2LMiR1to9onrnyO233HEIOS1HU+dJTXHFSh8z3fMze2TqPt58w=="
       socket_cli_integrity:
-        description: "NPM dist.integrity for @socketsecurity/cli@<version>"
+        description: "NPM dist.integrity for @socketsecurity/cli@<version> (see SOCKET_CLI_VERSION env)"
         required: false
         type: string
         default: "sha512-90XY7vNr09gruR6R2jstP7JlS4fnBu1uVawQf3BkKBa8usk5o6DU27yadKaXFmjw1MxzELGuJbGlB0UkmdR+qg=="
+      socket_cli_version:
+        description: "Socket CLI version override"
+        required: false
+        type: string
+        default: "1.1.49"
 
       run_smoke_test:
         description: "Run container smoke tests after image scanning"
@@ -320,6 +325,7 @@ env:
   DIVE_VERSION: "0.13.1"
   SEMGREP_VERSION: "1.145.0"
   SNYK_VERSION: "1.1301.2"
+  SOCKET_CLI_VERSION: ${{ inputs.socket_cli_version }}
   LICENSE_CHECKER_VERSION: "25.0.1"
   LICENSE_MAVEN_PLUGIN_VERSION: "2.4.0"
   DEPENDENCY_CHECK_VERSION: "12.1.9"
@@ -979,17 +985,17 @@ jobs:
             exit 1
           fi
           if [ -n "${{ inputs.socket_cli_integrity }}" ]; then
-            actual="$(npm view @socketsecurity/cli@1.1.49 dist.integrity | tr -d '\r\n')"
+            actual="$(npm view @socketsecurity/cli@${{ env.SOCKET_CLI_VERSION }} dist.integrity | tr -d '\r\n')"
             if [ -z "$actual" ]; then
-              echo "::error::Unable to resolve integrity for @socketsecurity/cli@1.1.49"
+              echo "::error::Unable to resolve integrity for @socketsecurity/cli@${{ env.SOCKET_CLI_VERSION }}"
               exit 1
             fi
             if [ "$actual" != "${{ inputs.socket_cli_integrity }}" ]; then
-              echo "::error::Socket CLI integrity mismatch for @socketsecurity/cli@1.1.49"
+              echo "::error::Socket CLI integrity mismatch for @socketsecurity/cli@${{ env.SOCKET_CLI_VERSION }}"
               exit 1
             fi
           fi
-          npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
+          npm exec --yes --package=@socketsecurity/cli@${{ env.SOCKET_CLI_VERSION }} -- socket ci
 
       - name: Socket.dev skipped
         if: inputs.enable_socket == true && needs.detect.outputs.has_frontend == 'true' && env.HAS_SOCKET_TOKEN != 'true'
@@ -1027,6 +1033,7 @@ jobs:
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_backend == 'true'
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         id: snyk_backend
+        continue-on-error: ${{ inputs.enforce_policies != true }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -1036,6 +1043,7 @@ jobs:
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.has_frontend == 'true'
         working-directory: ${{ needs.detect.outputs.frontend_dir }}
         id: snyk_frontend
+        continue-on-error: ${{ inputs.enforce_policies != true }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -2305,6 +2313,7 @@ jobs:
       - name: Snyk container test (backend)
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_backend_image == 'true'
         id: snyk_container_backend
+        continue-on-error: ${{ inputs.enforce_policies != true }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -2316,6 +2325,7 @@ jobs:
       - name: Snyk container test (frontend)
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true' && needs.detect.outputs.build_frontend_image == 'true'
         id: snyk_container_frontend
+        continue-on-error: ${{ inputs.enforce_policies != true }}
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
         run: |
@@ -2460,7 +2470,7 @@ jobs:
 
           echo ""
           echo "Showing only HIGH/CRITICAL findings:"
-          { head -n 2 "$tmp"; grep -E '\s(High|Critical)\s*$' "$tmp" || true; }
+          { head -n 2 "$tmp"; grep -E '[[:space:]](High|Critical)[[:space:]]*$' "$tmp" || true; }
 
           grype "$REF" -o sarif --file grype-backend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
@@ -2481,7 +2491,7 @@ jobs:
 
           echo ""
           echo "Showing only HIGH/CRITICAL findings:"
-          { head -n 2 "$tmp"; grep -E '\\s(High|Critical)\\s*$' "$tmp" || true; }
+          { head -n 2 "$tmp"; grep -E '[[:space:]](High|Critical)[[:space:]]*$' "$tmp" || true; }
 
           grype "$REF" -o sarif --file grype-backend-linux-arm64-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
@@ -2502,7 +2512,7 @@ jobs:
 
           echo ""
           echo "Showing only HIGH/CRITICAL findings:"
-          { head -n 2 "$tmp"; grep -E '\s(High|Critical)\s*$' "$tmp" || true; }
+          { head -n 2 "$tmp"; grep -E '[[:space:]](High|Critical)[[:space:]]*$' "$tmp" || true; }
 
           grype "$REF" -o sarif --file grype-frontend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
@@ -2523,7 +2533,7 @@ jobs:
 
           echo ""
           echo "Showing only HIGH/CRITICAL findings:"
-          { head -n 2 "$tmp"; grep -E '\\s(High|Critical)\\s*$' "$tmp" || true; }
+          { head -n 2 "$tmp"; grep -E '[[:space:]](High|Critical)[[:space:]]*$' "$tmp" || true; }
 
           grype "$REF" -o sarif --file grype-frontend-linux-arm64-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
@@ -3179,18 +3189,49 @@ jobs:
         run: |
           set -euo pipefail
           api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100"
-          if ! curl -sSf \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "$api" > run-artifacts.json; then
-            echo "::warning::Failed to list artifacts for this run."
-            echo "has_sarif_pattern=false" >> "$GITHUB_OUTPUT"
-            for n in release-sboms dockle-reports dependency-check license-reports; do
-              echo "has_${n//-/_}=false" >> "$GITHUB_OUTPUT"
-            done
-            exit 0
-          fi
+          page=1
+          pages=0
+          tmp="$(mktemp)"
+          merged="$(mktemp)"
+          echo '{"artifacts":[]}' > run-artifacts.json
+
+          while :; do
+            url="${api}&page=${page}"
+            if ! curl -sSf \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "$url" > "$tmp"; then
+              if [ "$page" -eq 1 ]; then
+                echo "::warning::Failed to list artifacts for this run."
+                echo "has_sarif_pattern=false" >> "$GITHUB_OUTPUT"
+                echo "artifact_total=0" >> "$GITHUB_OUTPUT"
+                echo "page_count=0" >> "$GITHUB_OUTPUT"
+                for n in release-sboms dockle-reports dependency-check license-reports; do
+                  echo "has_${n//-/_}=false" >> "$GITHUB_OUTPUT"
+                done
+                exit 0
+              fi
+              echo "::warning::Failed to list artifacts page ${page}; results may be incomplete."
+              break
+            fi
+
+            pages=$((pages + 1))
+            count="$(jq -r '.artifacts | length' "$tmp" 2>/dev/null || echo 0)"
+            if [ "$count" -eq 0 ]; then
+              break
+            fi
+
+            jq -s '{artifacts: (.[0].artifacts + .[1].artifacts)}' run-artifacts.json "$tmp" > "$merged"
+            mv "$merged" run-artifacts.json
+            page=$((page + 1))
+          done
+
+          rm -f "$tmp" "$merged"
+
+          total_count="$(jq -r '.artifacts | length' run-artifacts.json 2>/dev/null || echo 0)"
+          echo "artifact_total=$total_count" >> "$GITHUB_OUTPUT"
+          echo "page_count=$pages" >> "$GITHUB_OUTPUT"
 
           has_name() {
             local n="$1"
@@ -3388,6 +3429,8 @@ jobs:
 
           ## Artifacts Generated
           - Consolidated Security Report: `consolidated-report.md` (artifact: `consolidated-security-report`)
+          - Artifact pages scanned: ${{ steps.list_artifacts.outputs.page_count }}
+          - Artifacts listed: ${{ steps.list_artifacts.outputs.artifact_total }}
           EOF
 
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
