@@ -155,10 +155,30 @@ on:
         type: boolean
         default: false
       enable_secrets_scanning:
-        description: "Enable comprehensive secrets scanning"
+        description: "Enable comprehensive secrets scanning (master toggle)"
         required: false
         type: boolean
         default: true
+      enable_trivy_secrets:
+        description: "Enable Trivy secrets scanning"
+        required: false
+        type: boolean
+        default: true
+      enable_gitleaks:
+        description: "Enable Gitleaks secrets scanning"
+        required: false
+        type: boolean
+        default: true
+      enable_trufflehog:
+        description: "Enable TruffleHog secrets scanning"
+        required: false
+        type: boolean
+        default: true
+      enable_sonarqube:
+        description: "Enable SonarQube analysis"
+        required: false
+        type: boolean
+        default: false
       enable_license_compliance:
         description: "Enable license compliance checking"
         required: false
@@ -304,6 +324,10 @@ on:
         required: false
       SOCKET_CLI_API_TOKEN:
         required: false
+      SONAR_HOST_URL:
+        required: false
+      SONAR_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -339,6 +363,8 @@ env:
   COSIGN_EXPERIMENTAL: "true"
 
   BANNED_LICENSE_TOKENS: "GPL-3.0,AGPL-3.0,LGPL-3.0"
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 jobs:
   detect:
@@ -614,6 +640,8 @@ jobs:
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
           SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           set -euo pipefail
           missing=0
@@ -635,6 +663,18 @@ jobs:
               missing=1
             else
               echo "::warning::$msg"
+            fi
+          fi
+
+          if [ "${{ inputs.enable_sonarqube }}" = "true" ]; then
+            if [ -z "${SONAR_HOST_URL:-}" ] || [ -z "${SONAR_TOKEN:-}" ]; then
+              msg="enable_sonarqube=true but SONAR_HOST_URL/SONAR_TOKEN are not set"
+              if [ "${{ inputs.enforce_policies }}" = "true" ]; then
+                echo "::error::$msg"
+                missing=1
+              else
+                echo "::warning::$msg"
+              fi
             fi
           fi
 
@@ -737,7 +777,7 @@ jobs:
           PY
 
       - name: Trivy secret scan
-        if: inputs.enable_secrets_scanning == true
+        if: inputs.enable_secrets_scanning == true && inputs.enable_trivy_secrets == true
         id: trivy_secrets
         run: |
           set -euo pipefail
@@ -765,7 +805,7 @@ jobs:
           PY
 
       - name: Gitleaks secrets scan
-        if: inputs.enable_secrets_scanning == true
+        if: inputs.enable_secrets_scanning == true && inputs.enable_gitleaks == true
         id: gitleaks
         continue-on-error: true
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
@@ -773,7 +813,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
 
       - name: TruffleHog secrets scan
-        if: inputs.enable_secrets_scanning == true
+        if: inputs.enable_secrets_scanning == true && inputs.enable_trufflehog == true
         id: trufflehog
         continue-on-error: true
         run: |
@@ -806,6 +846,24 @@ jobs:
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
+
+      - name: SonarQube analysis
+        if: inputs.enable_sonarqube == true && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
+        id: sonar_scan
+        uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9
+        env:
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        continue-on-error: ${{ inputs.enforce_policies != true }}
+
+      - name: SonarQube quality gate
+        if: inputs.enable_sonarqube == true && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && steps.sonar_scan.outcome == 'success'
+        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b
+        timeout-minutes: 5
+        env:
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        continue-on-error: ${{ inputs.enforce_policies != true }}
 
       - name: Cache OWASP Dependency-Check data
         id: depcheck_cache
@@ -1191,15 +1249,15 @@ jobs:
           fi
 
           if [ "${{ inputs.enable_secrets_scanning }}" = "true" ]; then
-            if [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
+            if [ "${{ inputs.enable_trivy_secrets }}" = "true" ] && [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
               echo "::error::Trivy found secrets in filesystem (count=${TRIVY_SECRET_COUNT})"
               failures=1
             fi
-            if [ "${GITLEAKS_OUTCOME}" = "failure" ]; then
+            if [ "${{ inputs.enable_gitleaks }}" = "true" ] && [ "${GITLEAKS_OUTCOME}" = "failure" ]; then
               echo "::error::Gitleaks found secrets"
               failures=1
             fi
-            if [ "${TRUFFLEHOG_OUTCOME}" = "failure" ]; then
+            if [ "${{ inputs.enable_trufflehog }}" = "true" ] && [ "${TRUFFLEHOG_OUTCOME}" = "failure" ]; then
               echo "::error::TruffleHog found verified secrets (or scan failed)"
               failures=1
             fi
@@ -3422,10 +3480,14 @@ jobs:
           - Snyk Scanning: ${{ inputs.enable_snyk && 'Enabled' || 'Disabled' }}
           - Socket.dev: ${{ inputs.enable_socket && 'Enabled (Supply Chain)' || 'Disabled' }}
           - OWASP Dependency-Check: ${{ inputs.enable_owasp_dependency_check && 'Enabled' || 'Disabled' }}
-          - Secrets Scanning: ${{ inputs.enable_secrets_scanning && 'Enabled (Gitleaks + TruffleHog + Trivy)' || 'Disabled' }}
+          - Secrets Scanning: ${{ inputs.enable_secrets_scanning && 'Enabled' || 'Disabled' }}
+          - Trivy Secrets: ${{ inputs.enable_secrets_scanning && inputs.enable_trivy_secrets && 'Enabled' || 'Disabled' }}
+          - Gitleaks: ${{ inputs.enable_secrets_scanning && inputs.enable_gitleaks && 'Enabled' || 'Disabled' }}
+          - TruffleHog: ${{ inputs.enable_secrets_scanning && inputs.enable_trufflehog && 'Enabled' || 'Disabled' }}
           - License Compliance: ${{ inputs.enable_license_compliance && 'Enabled' || 'Disabled' }}
           - Supply Chain Security: ${{ inputs.enable_supply_chain_security && 'Enabled (Scorecard + Dependency Review)' || 'Disabled' }}
           - Policy Enforcement: ${{ inputs.enforce_policies && 'Strict' || 'Advisory' }}
+          - SonarQube: ${{ inputs.enable_sonarqube && 'Enabled' || 'Disabled' }}
 
           ## Artifacts Generated
           - Consolidated Security Report: `consolidated-report.md` (artifact: `consolidated-security-report`)

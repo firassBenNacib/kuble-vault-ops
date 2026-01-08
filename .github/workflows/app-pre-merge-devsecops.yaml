@@ -35,7 +35,17 @@ on:
         type: boolean
         default: false
       enable_secrets_scanning:
-        description: "Enable secrets scanning (Gitleaks/TruffleHog/Trivy)"
+        description: "Enable secrets scanning (Gitleaks/Trivy)"
+        required: false
+        type: boolean
+        default: true
+      enable_trivy_secrets:
+        description: "Enable Trivy secrets scanning"
+        required: false
+        type: boolean
+        default: false
+      enable_gitleaks:
+        description: "Enable Gitleaks secrets scanning"
         required: false
         type: boolean
         default: true
@@ -49,18 +59,13 @@ on:
         required: false
         type: boolean
         default: false
-      enable_sonarqube:
-        description: "Enable SonarQube analysis"
-        required: false
-        type: boolean
-        default: false
       enable_license_compliance:
         description: "Enable license compliance checks"
         required: false
         type: boolean
         default: true
       enable_supply_chain_security:
-        description: "Enable dependency review and scorecard checks"
+        description: "Enable dependency review checks"
         required: false
         type: boolean
         default: false
@@ -109,11 +114,6 @@ on:
         required: false
         type: boolean
         default: true
-      trufflehog_image_digest:
-        description: "Pinned digest for TruffleHog image, sha256:..."
-        required: false
-        type: string
-        default: "sha256:c28ab4a11e01d6fcc10776f65cce015bdf9795f2393cffa2ec0a7c8464ee58b6"
       semgrep_sha256:
         description: "SHA256 for semgrep wheel/sdist selected by pip download"
         required: false
@@ -129,10 +129,6 @@ on:
       NVD_API_KEY:
         required: false
       SEMGREP_APP_TOKEN:
-        required: false
-      SONAR_HOST_URL:
-        required: false
-      SONAR_TOKEN:
         required: false
 
 permissions:
@@ -153,14 +149,11 @@ env:
   LICENSE_CHECKER_VERSION: "25.0.1"
   LICENSE_MAVEN_PLUGIN_VERSION: "2.4.0"
   DEPENDENCY_CHECK_VERSION: "12.1.9"
-  TRUFFLEHOG_TAG: "3.92.4"
 
   IMAGE_TAG: ${{ github.sha }}
 
   TRIVY_SEVERITY: "CRITICAL,HIGH"
   BANNED_LICENSE_TOKENS: "GPL-3.0,AGPL-3.0,LGPL-3.0"
-  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 jobs:
   detect:
@@ -533,7 +526,7 @@ jobs:
           PY
 
       - name: Trivy secret scan
-        if: inputs.enable_secrets_scanning == true
+        if: inputs.enable_secrets_scanning == true && inputs.enable_trivy_secrets == true
         id: trivy_secrets
         run: |
           set -euo pipefail
@@ -561,31 +554,12 @@ jobs:
           PY
 
       - name: Gitleaks secrets scan
-        if: inputs.enable_secrets_scanning == true
+        if: inputs.enable_secrets_scanning == true && inputs.enable_gitleaks == true
         id: gitleaks
         continue-on-error: true
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7
         env:
           GITHUB_TOKEN: ${{ github.token }}
-
-      - name: TruffleHog secrets scan
-        if: inputs.enable_secrets_scanning == true
-        id: trufflehog
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          IMAGE_REF="ghcr.io/trufflesecurity/trufflehog:${{ env.TRUFFLEHOG_TAG }}"
-          if [ -n "${{ inputs.trufflehog_image_digest }}" ]; then
-            IMAGE_REF="ghcr.io/trufflesecurity/trufflehog@${{ inputs.trufflehog_image_digest }}"
-          elif [ "${{ inputs.enforce_tool_verification }}" = "true" ]; then
-            echo "::error::trufflehog_image_digest is required when enforce_tool_verification=true"
-            exit 1
-          else
-            echo "::warning::trufflehog_image_digest not provided; using tag ${TRUFFLEHOG_TAG}"
-          fi
-          docker run --rm -v "$(pwd):/workdir" "$IMAGE_REF" \
-            filesystem /workdir --only-verified 2>&1 | tee trufflehog.log
-          tail -200 trufflehog.log
 
       - name: Setup backend dependencies
         if: needs.detect.outputs.has_backend == 'true'
@@ -658,24 +632,6 @@ jobs:
           fi
           set -e
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
-
-      - name: SonarQube analysis
-        if: inputs.enable_sonarqube == true && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != ''
-        id: sonar_scan
-        uses: SonarSource/sonarqube-scan-action@a31c9398be7ace6bbfaf30c0bd5d415f843d45e9
-        env:
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-        continue-on-error: ${{ inputs.enforce_policies != true }}
-
-      - name: SonarQube quality gate
-        if: inputs.enable_sonarqube == true && env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' && steps.sonar_scan.outcome == 'success'
-        uses: sonarsource/sonarqube-quality-gate-action@cf038b0e0cdecfa9e56c198bbb7d21d751d62c3b
-        timeout-minutes: 5
-        env:
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-        continue-on-error: ${{ inputs.enforce_policies != true }}
 
       - name: Cache OWASP Dependency-Check data
         id: depcheck_cache
@@ -940,7 +896,6 @@ jobs:
           TRIVY_FS_COUNT: ${{ steps.trivy_fs.outputs.vuln_count }}
           TRIVY_SECRET_COUNT: ${{ steps.trivy_secrets.outputs.secret_count }}
           GITLEAKS_OUTCOME: ${{ steps.gitleaks.outcome }}
-          TRUFFLEHOG_OUTCOME: ${{ steps.trufflehog.outcome }}
           SEMGREP_SARIF_EXISTS: ${{ steps.semgrep_premerge.outputs.sarif_exists }}
           SEMGREP_FINDING_COUNT: ${{ steps.semgrep_premerge.outputs.finding_count }}
           SEMGREP_EXIT_CODE: ${{ steps.semgrep_premerge.outputs.exit_code }}
@@ -967,16 +922,12 @@ jobs:
           fi
 
           if [ "${{ inputs.enable_secrets_scanning }}" = "true" ]; then
-            if [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
+            if [ "${{ inputs.enable_trivy_secrets }}" = "true" ] && [ "${TRIVY_SECRET_COUNT:-0}" -ne 0 ]; then
               echo "::error::Trivy found secrets in filesystem (count=${TRIVY_SECRET_COUNT})"
               failures=1
             fi
-            if [ "${GITLEAKS_OUTCOME}" = "failure" ]; then
+            if [ "${{ inputs.enable_gitleaks }}" = "true" ] && [ "${GITLEAKS_OUTCOME}" = "failure" ]; then
               echo "::error::Gitleaks found secrets"
-              failures=1
-            fi
-            if [ "${TRUFFLEHOG_OUTCOME}" = "failure" ]; then
-              echo "::error::TruffleHog found verified secrets (or scan failed)"
               failures=1
             fi
           fi
@@ -1303,53 +1254,6 @@ jobs:
           fail-on-severity: high
           warn-only: ${{ inputs.enforce_policies != true }}
 
-      - name: Run OpenSSF Scorecard (JSON)
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
-        with:
-          results_file: scorecard.json
-          results_format: json
-          publish_results: false
-
-      - name: Evaluate Scorecard policy
-        env:
-          ENFORCE_POLICIES: ${{ inputs.enforce_policies }}
-        run: |
-          python3 - <<'PY'
-          import json, os, sys
-          data=json.load(open('scorecard.json'))
-          overall=data.get('score',0)
-          checks=data.get('checks',[])
-          critical=['Security-Policy','SAST','Branch-Protection','Pinned-Dependencies']
-          failures=[]
-          if overall < 6.0:
-            failures.append(f"overall score {overall} < 6.0")
-          for c in checks:
-            if c.get('name') in critical and (c.get('score') or 0) < 6:
-              failures.append(f"{c.get('name')} score {(c.get('score') or 0)} < 6")
-
-          if failures:
-            msg="Scorecard policy failed: " + "; ".join(failures)
-            if os.environ.get("ENFORCE_POLICIES","false").lower() == "true":
-              print(f"::error::{msg}")
-              sys.exit(1)
-            print(f"::warning::{msg}")
-          PY
-
-      - name: Run OpenSSF Scorecard (SARIF)
-        if: inputs.enable_code_scanning == true
-        uses: ossf/scorecard-action@4eaacf0543bb3f2c246792bd56e8cdeffafb205a
-        with:
-          results_file: scorecard.sarif
-          results_format: sarif
-          publish_results: false
-
-      - name: Upload Scorecard SARIF to code scanning
-        if: inputs.enable_code_scanning == true && hashFiles('scorecard.sarif') != ''
-        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
-        with:
-          sarif_file: scorecard.sarif
-          category: scorecard-premerge
-
   image_security_scan:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -1619,15 +1523,16 @@ jobs:
           |-------|--------|---------|
           | Pre-merge Security | ${{ needs.pre_merge_security.result }} | SAST, secrets, dependency checks, tests |
           | License Compliance | ${{ needs.license_compliance.result }} | License checks |
-          | Supply Chain Security | ${{ needs.supply_chain_security.result }} | Scorecard, dependency review (PRs) |
+          | Supply Chain Security | ${{ needs.supply_chain_security.result }} | Dependency review (PRs) |
           | Image Security Scan | ${{ needs.image_security_scan.result }} | Local build + Trivy |
 
           ## Security Features
           - Code Scanning: ${{ inputs.enable_code_scanning && 'Enabled (SARIF upload)' || 'Disabled' }}
           - Secrets Scanning: ${{ inputs.enable_secrets_scanning && 'Enabled' || 'Disabled' }}
+          - Trivy Secrets: ${{ inputs.enable_secrets_scanning && inputs.enable_trivy_secrets && 'Enabled' || 'Disabled' }}
+          - Gitleaks: ${{ inputs.enable_secrets_scanning && inputs.enable_gitleaks && 'Enabled' || 'Disabled' }}
           - SAST (Semgrep): ${{ inputs.run_comprehensive_sast && 'Enabled' || 'Disabled' }}
           - Trunk: ${{ inputs.enable_trunk && 'Enabled' || 'Disabled' }}
-          - SonarQube: ${{ inputs.enable_sonarqube && 'Enabled' || 'Disabled' }}
           - OWASP Dependency-Check: ${{ inputs.enable_owasp_dependency_check && 'Enabled' || 'Disabled' }}
           - License Compliance: ${{ inputs.enable_license_compliance && 'Enabled' || 'Disabled' }}
           - Supply Chain Security: ${{ inputs.enable_supply_chain_security && 'Enabled' || 'Disabled' }}
