@@ -34,7 +34,7 @@ on:
         type: string
         default: ""
       acr_login_server:
-        description: "Azure Container Registry login server, myregistry.azurecr.io"
+        description: "Azure Container Registry login server"
         required: false
         type: string
         default: ""
@@ -49,22 +49,22 @@ on:
         type: string
         default: ""
       backend_dir:
-        description: "Override backend directory (auto-detect when empty)"
+        description: "Override backend directory"
         required: false
         type: string
         default: ""
       frontend_dir:
-        description: "Override frontend directory (auto-detect when empty)"
+        description: "Override frontend directory"
         required: false
         type: string
         default: ""
       backend_dockerfile:
-        description: "Override backend Dockerfile path (auto-detect when empty)"
+        description: "Override backend Dockerfile path"
         required: false
         type: string
         default: ""
       frontend_dockerfile:
-        description: "Override frontend Dockerfile path (auto-detect when empty)"
+        description: "Override frontend Dockerfile path"
         required: false
         type: string
         default: ""
@@ -114,6 +114,16 @@ on:
         required: false
         type: boolean
         default: true
+      caller_event_name:
+        description: "Caller workflow github.event_name"
+        required: false
+        type: string
+        default: ""
+      is_pr:
+        description: "True when this reusable workflow is called from a PR workflow"
+        required: false
+        type: boolean
+        default: false
       promote_to_latest:
         description: "Promote images to :latest tag"
         required: false
@@ -205,6 +215,21 @@ on:
         required: false
         type: string
         default: "0c20d18f0cc87e6e982a3289712ac3aa9fc364ba973109d1da3a473232640571"
+      semgrep_sha256:
+        description: "SHA256 for semgrep wheel/sdist selected by pip download"
+        required: false
+        type: string
+        default: "5baa96a868aea8e25c040bd321b4c28f868c2cc88085a6c9db696576eddc011e"
+      snyk_integrity:
+        description: "NPM dist.integrity for snyk@<version>"
+        required: false
+        type: string
+        default: "sha512-FUTV/2WStY0GyvJROvxKPa2A3FzgVNIUB8rR2LMiR1to9onrnyO233HEIOS1HU+dJTXHFSh8z3fMze2TqPt58w=="
+      socket_cli_integrity:
+        description: "NPM dist.integrity for @socketsecurity/cli@<version>"
+        required: false
+        type: string
+        default: "sha512-90XY7vNr09gruR6R2jstP7JlS4fnBu1uVawQf3BkKBa8usk5o6DU27yadKaXFmjw1MxzELGuJbGlB0UkmdR+qg=="
 
       run_smoke_test:
         description: "Run container smoke tests after image scanning"
@@ -615,7 +640,21 @@ jobs:
         if: inputs.run_comprehensive_sast == true
         run: |
           python3 -m pip install --no-cache-dir --upgrade pip
-          python3 -m pip install --no-cache-dir semgrep==${{ env.SEMGREP_VERSION }}
+          if [ "${{ inputs.enforce_tool_verification }}" = "true" ] && [ -z "${{ inputs.semgrep_sha256 }}" ]; then
+            echo "::error::semgrep_sha256 is required when enforce_tool_verification=true"
+            exit 1
+          fi
+          tmp_dir="$(mktemp -d)"
+          python3 -m pip download --no-deps --dest "$tmp_dir" "semgrep==${{ env.SEMGREP_VERSION }}"
+          pkg="$(ls -1 "$tmp_dir"/semgrep-* 2>/dev/null | head -n 1)"
+          if [ -z "$pkg" ]; then
+            echo "::error::Failed to download semgrep package for verification."
+            exit 1
+          fi
+          if [ -n "${{ inputs.semgrep_sha256 }}" ]; then
+            echo "${{ inputs.semgrep_sha256 }}  $pkg" | sha256sum -c -
+          fi
+          python3 -m pip install --no-cache-dir "$pkg"
           semgrep --version
 
       - name: Run Semgrep SAST
@@ -761,10 +800,6 @@ jobs:
         with:
           frontend_dir: ${{ needs.detect.outputs.frontend_dir }}
           node_version: "20"
-
-      - name: Set Dependency-Check data directory
-        if: inputs.enable_owasp_dependency_check == true && needs.detect.outputs.has_backend == 'true'
-        run: echo "DEPENDENCY_CHECK_DATA=${RUNNER_TEMP}/dependency-check" >> "$GITHUB_ENV"
 
       - name: Cache OWASP Dependency-Check data
         id: depcheck_cache
@@ -929,6 +964,21 @@ jobs:
           SOCKET_CLI_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
           SOCKET_SECURITY_API_TOKEN: ${{ secrets.SOCKET_CLI_API_TOKEN }}
         run: |
+          if [ "${{ inputs.enforce_tool_verification }}" = "true" ] && [ -z "${{ inputs.socket_cli_integrity }}" ]; then
+            echo "::error::socket_cli_integrity is required when enforce_tool_verification=true"
+            exit 1
+          fi
+          if [ -n "${{ inputs.socket_cli_integrity }}" ]; then
+            actual="$(npm view @socketsecurity/cli@1.1.49 dist.integrity | tr -d '\r\n')"
+            if [ -z "$actual" ]; then
+              echo "::error::Unable to resolve integrity for @socketsecurity/cli@1.1.49"
+              exit 1
+            fi
+            if [ "$actual" != "${{ inputs.socket_cli_integrity }}" ]; then
+              echo "::error::Socket CLI integrity mismatch for @socketsecurity/cli@1.1.49"
+              exit 1
+            fi
+          fi
           npm exec --yes --package=@socketsecurity/cli@1.1.49 -- socket ci
 
       - name: Socket.dev skipped
@@ -945,6 +995,21 @@ jobs:
       - name: Install Snyk CLI
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
         run: |
+          if [ "${{ inputs.enforce_tool_verification }}" = "true" ] && [ -z "${{ inputs.snyk_integrity }}" ]; then
+            echo "::error::snyk_integrity is required when enforce_tool_verification=true"
+            exit 1
+          fi
+          if [ -n "${{ inputs.snyk_integrity }}" ]; then
+            actual="$(npm view snyk@${{ env.SNYK_VERSION }} dist.integrity | tr -d '\r\n')"
+            if [ -z "$actual" ]; then
+              echo "::error::Unable to resolve integrity for snyk@${{ env.SNYK_VERSION }}"
+              exit 1
+            fi
+            if [ "$actual" != "${{ inputs.snyk_integrity }}" ]; then
+              echo "::error::Snyk integrity mismatch for snyk@${{ env.SNYK_VERSION }}"
+              exit 1
+            fi
+          fi
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
@@ -1202,7 +1267,7 @@ jobs:
           node_version: "20"
 
       - name: Maven license check
-        if: needs.detect.outputs.has_backend == 'true'
+        if: needs.detect.outputs.has_backend == 'true' && steps.backend_setup.outputs.build_tool == 'maven'
         id: maven_license
         working-directory: ${{ needs.detect.outputs.backend_dir }}
         run: |
@@ -1212,20 +1277,18 @@ jobs:
           report_generated=false
           mvn_rc=0
 
-          if [ -f "pom.xml" ]; then
-            goal="add-third-party"
-            if grep -q "<modules>" pom.xml; then
-              goal="aggregate-add-third-party"
-            fi
-            set +e
-            mvn -B -ntp org.codehaus.mojo:license-maven-plugin:${LICENSE_MAVEN_PLUGIN_VERSION}:${goal} \
-              -Dlicense.excludedScopes=test,provided \
-              -Dlicense.outputDirectory=target/generated-sources/license \
-              -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
-              2>&1 | sed "/Parameter 'skip' is unknown/d"
-            mvn_rc=${PIPESTATUS[0]}
-            set -e
+          goal="add-third-party"
+          if grep -q "<modules>" pom.xml; then
+            goal="aggregate-add-third-party"
           fi
+          set +e
+          mvn -B -ntp org.codehaus.mojo:license-maven-plugin:${LICENSE_MAVEN_PLUGIN_VERSION}:${goal} \
+            -Dlicense.excludedScopes=test,provided \
+            -Dlicense.outputDirectory=target/generated-sources/license \
+            -Dlicense.thirdPartyFilename=THIRD-PARTY.txt \
+            2>&1 | sed "/Parameter 'skip' is unknown/d"
+          mvn_rc=${PIPESTATUS[0]}
+          set -e
 
           LIC_FILE=""
           for f in \
@@ -1256,6 +1319,85 @@ jobs:
             echo "mvn_rc=$mvn_rc"
             echo "report_generated=$report_generated"
             echo "banned_found=$banned_found"
+            echo "report_path=$LIC_FILE"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Gradle license report
+        if: needs.detect.outputs.has_backend == 'true' && steps.backend_setup.outputs.build_tool == 'gradle'
+        id: gradle_license
+        working-directory: ${{ needs.detect.outputs.backend_dir }}
+        run: |
+          set -euo pipefail
+
+          banned_found=false
+          report_generated=false
+          task_found=false
+          gradle_rc=0
+          report_file=""
+
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew || true
+          else
+            echo "::warning::Gradle wrapper (./gradlew) not found; skipping Gradle license report generation."
+          fi
+
+          tasks=""
+          if [ -x "./gradlew" ]; then
+            set +e
+            tasks="$(./gradlew -q tasks --all 2>/dev/null)"
+            set -e
+          fi
+
+          selected=""
+          for t in generateLicenseReport licenseReport downloadLicenses; do
+            if printf '%s\n' "$tasks" | grep -qE "(^|[[:space:]])${t}([[:space:]]|$)"; then
+              selected="$t"
+              break
+            fi
+          done
+
+          if [ -n "$selected" ]; then
+            task_found=true
+            set +e
+            ./gradlew "${selected}"
+            gradle_rc=$?
+            set -e
+          else
+            echo "::warning::No known Gradle license-report task found (expected one of: generateLicenseReport, licenseReport, downloadLicenses)."
+          fi
+
+          for f in \
+            "build/reports/dependency-license/THIRD-PARTY.txt" \
+            "build/reports/dependency-license/third-party.txt" \
+            "build/reports/license/THIRD-PARTY.txt" \
+            "build/reports/licenses/THIRD-PARTY.txt" \
+            "build/reports/dependency-license/index.html" \
+            "build/reports/license/index.html" \
+            "build/reports/licenses/index.html"
+          do
+            if [ -f "$f" ]; then
+              report_file="$f"
+              break
+            fi
+          done
+
+          if [ -n "$report_file" ]; then
+            report_generated=true
+            IFS=',' read -r -a TOKENS <<< "${BANNED_LICENSE_TOKENS}"
+            for token in "${TOKENS[@]}"; do
+              if grep -iq "$token" "$report_file"; then
+                echo "::error::Found banned license token '$token' in: $report_file"
+                banned_found=true
+              fi
+            done
+          fi
+
+          {
+            echo "gradle_rc=$gradle_rc"
+            echo "task_found=$task_found"
+            echo "report_generated=$report_generated"
+            echo "banned_found=$banned_found"
+            echo "report_path=$report_file"
           } >> "$GITHUB_OUTPUT"
 
       - name: npm license report
@@ -1293,6 +1435,11 @@ jobs:
           name: license-reports
           path: |
             ${{ needs.detect.outputs.backend_dir }}/target/generated-sources/license/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/target/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/THIRD-PARTY.txt
+            ${{ needs.detect.outputs.backend_dir }}/build/reports/dependency-license/**
+            ${{ needs.detect.outputs.backend_dir }}/build/reports/license/**
+            ${{ needs.detect.outputs.backend_dir }}/build/reports/licenses/**
             ${{ needs.detect.outputs.frontend_dir }}/licenses.json
           retention-days: 90
           if-no-files-found: ignore
@@ -1302,27 +1449,48 @@ jobs:
         env:
           HAS_BACKEND: ${{ needs.detect.outputs.has_backend }}
           HAS_FRONTEND: ${{ needs.detect.outputs.has_frontend }}
+          BACKEND_BUILD_TOOL: ${{ steps.backend_setup.outputs.build_tool }}
           MAVEN_RC: ${{ steps.maven_license.outputs.mvn_rc }}
           MAVEN_REPORT: ${{ steps.maven_license.outputs.report_generated }}
           MAVEN_BANNED: ${{ steps.maven_license.outputs.banned_found }}
+          GRADLE_RC: ${{ steps.gradle_license.outputs.gradle_rc }}
+          GRADLE_TASK_FOUND: ${{ steps.gradle_license.outputs.task_found }}
+          GRADLE_REPORT: ${{ steps.gradle_license.outputs.report_generated }}
+          GRADLE_BANNED: ${{ steps.gradle_license.outputs.banned_found }}
           NPM_BANNED_COUNT: ${{ steps.npm_license.outputs.banned_count }}
         run: |
           failures=0
 
           if [ "${HAS_BACKEND}" = "true" ]; then
-            if [ "${MAVEN_RC:-0}" -ne 0 ]; then
-              echo "::error::Maven license report generation failed (exit=${MAVEN_RC})"
-              failures=1
-            fi
+            if [ "${BACKEND_BUILD_TOOL}" = "maven" ]; then
+              if [ "${MAVEN_RC:-0}" -ne 0 ]; then
+                echo "::error::Maven license report generation failed (exit=${MAVEN_RC})"
+                failures=1
+              fi
 
-            if [ "${MAVEN_REPORT}" != "true" ]; then
-              echo "::error::Missing THIRD-PARTY.txt (treating as policy failure)"
-              failures=1
-            fi
+              if [ "${MAVEN_REPORT}" != "true" ]; then
+                echo "::error::Missing THIRD-PARTY.txt (treating as policy failure for Maven backends)"
+                failures=1
+              fi
 
-            if [ "${MAVEN_BANNED}" = "true" ]; then
-              echo "::error::Maven dependencies contain banned licenses"
-              failures=1
+              if [ "${MAVEN_BANNED}" = "true" ]; then
+                echo "::error::Maven dependencies contain banned licenses"
+                failures=1
+              fi
+            elif [ "${BACKEND_BUILD_TOOL}" = "gradle" ]; then
+              if [ "${GRADLE_TASK_FOUND}" = "true" ] && [ "${GRADLE_RC:-0}" -ne 0 ]; then
+                echo "::error::Gradle license report generation failed (exit=${GRADLE_RC})"
+                failures=1
+              fi
+
+              if [ "${GRADLE_REPORT}" = "true" ] && [ "${GRADLE_BANNED}" = "true" ]; then
+                echo "::error::Gradle dependencies contain banned licenses"
+                failures=1
+              elif [ "${GRADLE_REPORT}" != "true" ]; then
+                echo "::warning::No Gradle license report found; skipping THIRD-PARTY enforcement for Gradle backends."
+              fi
+            else
+              echo "::warning::No backend build tool detected; skipping backend license compliance."
             fi
           fi
 
@@ -1354,7 +1522,7 @@ jobs:
           persist_credentials: false
 
       - name: Dependency Review (PR only)
-        if: github.event_name == 'pull_request'
+        if: inputs.is_pr == true || inputs.caller_event_name == 'pull_request' || inputs.caller_event_name == 'pull_request_target'
         uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261
         with:
           fail-on-severity: high
@@ -1851,6 +2019,21 @@ jobs:
       - name: Install Snyk CLI
         if: inputs.enable_snyk == true && env.HAS_SNYK_TOKEN == 'true'
         run: |
+          if [ "${{ inputs.enforce_tool_verification }}" = "true" ] && [ -z "${{ inputs.snyk_integrity }}" ]; then
+            echo "::error::snyk_integrity is required when enforce_tool_verification=true"
+            exit 1
+          fi
+          if [ -n "${{ inputs.snyk_integrity }}" ]; then
+            actual="$(npm view snyk@${{ env.SNYK_VERSION }} dist.integrity | tr -d '\r\n')"
+            if [ -z "$actual" ]; then
+              echo "::error::Unable to resolve integrity for snyk@${{ env.SNYK_VERSION }}"
+              exit 1
+            fi
+            if [ "$actual" != "${{ inputs.snyk_integrity }}" ]; then
+              echo "::error::Snyk integrity mismatch for snyk@${{ env.SNYK_VERSION }}"
+              exit 1
+            fi
+          fi
           npm install -g snyk@${{ env.SNYK_VERSION }}
           snyk --version
 
@@ -1872,25 +2055,94 @@ jobs:
           acr_username: ${{ secrets.ACR_USERNAME }}
           acr_password: ${{ secrets.ACR_PASSWORD }}
 
+      - name: Set up Docker Buildx (imagetools)
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Resolve per-platform image digests
+        id: resolve_image_refs
+        if: needs.detect.outputs.build_any_image == 'true'
+        run: |
+          set -euo pipefail
+
+          resolve() {
+            local digest_ref="$1"
+            local platform="$2"
+            local repo="${digest_ref%@*}"
+            local os="${platform%/*}"
+            local arch="${platform#*/}"
+
+            raw="$(docker buildx imagetools inspect "$digest_ref" --raw 2>/dev/null || true)"
+            if [ -n "$raw" ] && echo "$raw" | jq -e '.manifests' >/dev/null 2>&1; then
+              digest="$(echo "$raw" | jq -r --arg os "$os" --arg arch "$arch" '.manifests[]? | select(.platform.os==$os and .platform.architecture==$arch) | .digest' | head -n 1)"
+              if [ -n "${digest:-}" ] && [ "${digest}" != "null" ]; then
+                echo "${repo}@${digest}"
+                return 0
+              fi
+            fi
+
+            echo "$digest_ref"
+          }
+
+          platforms="linux/amd64"
+          if [ "${{ inputs.enable_multi_arch }}" = "true" ]; then
+            platforms="linux/amd64 linux/arm64"
+          fi
+
+          if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
+            base="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
+            [ -n "$base" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+            for p in $platforms; do
+              key="backend_ref_${p//\//_}"
+              val="$(resolve "$base" "$p")"
+              echo "$key=$val" >> "$GITHUB_OUTPUT"
+            done
+          fi
+
+          if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
+            base="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
+            [ -n "$base" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+            for p in $platforms; do
+              key="frontend_ref_${p//\//_}"
+              val="$(resolve "$base" "$p")"
+              echo "$key=$val" >> "$GITHUB_OUTPUT"
+            done
+          fi
+
       - name: Generate backend SBOM with Syft
         if: inputs.enable_sbom_generation == true && needs.detect.outputs.build_backend_image == 'true'
         run: |
           set -euo pipefail
-          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
-          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
           syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=backend-release-sbom.spdx.json
+
+      - name: Generate backend SBOM with Syft (arm64)
+        if: inputs.enable_sbom_generation == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_backend_image == 'true'
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
+          syft --from registry "$REF" -o cyclonedx-json=backend-release-sbom-linux-arm64.cdx.json
+          syft --from registry "$REF" -o spdx-json=backend-release-sbom-linux-arm64.spdx.json
 
       - name: Generate frontend SBOM with Syft
         if: inputs.enable_sbom_generation == true && needs.detect.outputs.build_frontend_image == 'true'
         run: |
           set -euo pipefail
-          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
-          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
           syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom.cdx.json
           syft --from registry "$REF" -o spdx-json=frontend-release-sbom.spdx.json
+
+      - name: Generate frontend SBOM with Syft (arm64)
+        if: inputs.enable_sbom_generation == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_frontend_image == 'true'
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
+          syft --from registry "$REF" -o cyclonedx-json=frontend-release-sbom-linux-arm64.cdx.json
+          syft --from registry "$REF" -o spdx-json=frontend-release-sbom-linux-arm64.spdx.json
 
       - name: Validate SBOM quality
         if: inputs.enable_sbom_generation == true
@@ -1903,8 +2155,11 @@ jobs:
             count=$(jq '.components | length' "$sbom_file")
             [ "$count" -gt 0 ]
           }
-          if [ -f "backend-release-sbom.cdx.json" ]; then validate_sbom "backend-release-sbom.cdx.json"; fi
-          if [ -f "frontend-release-sbom.cdx.json" ]; then validate_sbom "frontend-release-sbom.cdx.json"; fi
+          for f in *-release-sbom*.cdx.json; do
+            if [ -f "$f" ]; then
+              validate_sbom "$f"
+            fi
+          done
 
       - name: Upload SBOM to Dependency-Track
         if: inputs.enable_dependency_track == true && env.HAS_DEPENDENCY_TRACK == 'true'
@@ -1942,9 +2197,15 @@ jobs:
           if [ -f "backend-release-sbom.cdx.json" ]; then
             upload_bom "backend-release-sbom.cdx.json" "${base}-backend" "${IMAGE_TAG}"
           fi
+          if [ -f "backend-release-sbom-linux-arm64.cdx.json" ]; then
+            upload_bom "backend-release-sbom-linux-arm64.cdx.json" "${base}-backend-linux-arm64" "${IMAGE_TAG}"
+          fi
 
           if [ -f "frontend-release-sbom.cdx.json" ]; then
             upload_bom "frontend-release-sbom.cdx.json" "${base}-frontend" "${IMAGE_TAG}"
+          fi
+          if [ -f "frontend-release-sbom-linux-arm64.cdx.json" ]; then
+            upload_bom "frontend-release-sbom-linux-arm64.cdx.json" "${base}-frontend-linux-arm64" "${IMAGE_TAG}"
           fi
 
       - name: Pull images for local scanners (Dockle/Dive)
@@ -1952,14 +2213,24 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ needs.detect.outputs.build_backend_image }}" = "true" ]; then
-            REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
-            [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
-            docker pull --platform linux/amd64 "$REF"
+            REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+            [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
+            docker pull "$REF"
+            if [ "${{ inputs.enable_multi_arch }}" = "true" ]; then
+              REF_ARM64="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+              [ -n "$REF_ARM64" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
+              docker pull "$REF_ARM64"
+            fi
           fi
           if [ "${{ needs.detect.outputs.build_frontend_image }}" = "true" ]; then
-            REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
-            [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
-            docker pull --platform linux/amd64 "$REF"
+            REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+            [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
+            docker pull "$REF"
+            if [ "${{ inputs.enable_multi_arch }}" = "true" ]; then
+              REF_ARM64="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+              [ -n "$REF_ARM64" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
+              docker pull "$REF_ARM64"
+            fi
           fi
 
       - name: Snyk container test (backend)
@@ -1989,9 +2260,8 @@ jobs:
         id: trivy_backend_image
         run: |
           set -euo pipefail
-          DIGEST="${{ needs.build_and_push_images.outputs.backend_digest }}"
-          [ -n "$DIGEST" ] || { echo "::error::Backend digest is empty"; exit 1; }
-          REF="${{ needs.build_and_push_images.outputs.backend_repo }}@${DIGEST}"
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-backend-release.sarif "$REF"
           if [ ! -s "trivy-backend-release.sarif" ]; then
@@ -2015,14 +2285,43 @@ jobs:
             print("vuln_count=0")
           PY
 
+      - name: Trivy scan backend image (arm64)
+        if: inputs.enable_multi_arch == true && needs.detect.outputs.build_backend_image == 'true'
+        id: trivy_backend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
+          trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
+          trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-backend-linux-arm64-release.sarif "$REF"
+          if [ ! -s "trivy-backend-linux-arm64-release.sarif" ]; then
+            echo "::error::Trivy backend (arm64) image SARIF report missing or empty."
+            exit 1
+          fi
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-backend-linux-arm64-release.sarif"):
+            try:
+              d=json.load(open("trivy-backend-linux-arm64-release.sarif"))
+              count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+              print("sarif_exists=true")
+              print(f"vuln_count={count}")
+            except Exception:
+              print("sarif_exists=false")
+              print("vuln_count=0")
+          else:
+            print("sarif_exists=false")
+            print("vuln_count=0")
+          PY
+
       - name: Trivy scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
         id: trivy_frontend_image
         run: |
           set -euo pipefail
-          DIGEST="${{ needs.build_and_push_images.outputs.frontend_digest }}"
-          [ -n "$DIGEST" ] || { echo "::error::Frontend digest is empty"; exit 1; }
-          REF="${{ needs.build_and_push_images.outputs.frontend_repo }}@${DIGEST}"
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
           trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-frontend-release.sarif "$REF"
           if [ ! -s "trivy-frontend-release.sarif" ]; then
@@ -2046,13 +2345,43 @@ jobs:
             print("vuln_count=0")
           PY
 
+      - name: Trivy scan frontend image (arm64)
+        if: inputs.enable_multi_arch == true && needs.detect.outputs.build_frontend_image == 'true'
+        id: trivy_frontend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
+          trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format table "$REF"
+          trivy image --severity "${TRIVY_SEVERITY}" --exit-code 0 --no-progress --format sarif --output trivy-frontend-linux-arm64-release.sarif "$REF"
+          if [ ! -s "trivy-frontend-linux-arm64-release.sarif" ]; then
+            echo "::error::Trivy frontend (arm64) image SARIF report missing or empty."
+            exit 1
+          fi
+
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          if os.path.exists("trivy-frontend-linux-arm64-release.sarif"):
+            try:
+              d=json.load(open("trivy-frontend-linux-arm64-release.sarif"))
+              count=sum(len(r.get("results",[]) or []) for r in d.get("runs",[]))
+              print("sarif_exists=true")
+              print(f"vuln_count={count}")
+            except Exception:
+              print("sarif_exists=false")
+              print("vuln_count=0")
+          else:
+            print("sarif_exists=false")
+            print("vuln_count=0")
+          PY
+
       - name: Grype scan backend image
         if: needs.detect.outputs.build_backend_image == 'true'
         id: grype_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
 
           tmp="$(mktemp)"
           set +e
@@ -2067,13 +2396,34 @@ jobs:
           grype "$REF" -o sarif --file grype-backend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
+      - name: Grype scan backend image (arm64)
+        if: inputs.enable_multi_arch == true && needs.detect.outputs.build_backend_image == 'true'
+        id: grype_backend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
+
+          tmp="$(mktemp)"
+          set +e
+          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table | tee "$tmp"
+          rc=$?
+          set -e
+
+          echo ""
+          echo "Showing only HIGH/CRITICAL findings:"
+          { head -n 2 "$tmp"; grep -E '\\s(High|Critical)\\s*$' "$tmp" || true; }
+
+          grype "$REF" -o sarif --file grype-backend-linux-arm64-release.sarif || true
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
       - name: Grype scan frontend image
         if: needs.detect.outputs.build_frontend_image == 'true'
         id: grype_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
 
           tmp="$(mktemp)"
           set +e
@@ -2088,13 +2438,34 @@ jobs:
           grype "$REF" -o sarif --file grype-frontend-release.sarif || true
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
 
+      - name: Grype scan frontend image (arm64)
+        if: inputs.enable_multi_arch == true && needs.detect.outputs.build_frontend_image == 'true'
+        id: grype_frontend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
+
+          tmp="$(mktemp)"
+          set +e
+          grype "$REF" --fail-on "${GRYPE_FAIL_SEVERITY}" -o table | tee "$tmp"
+          rc=$?
+          set -e
+
+          echo ""
+          echo "Showing only HIGH/CRITICAL findings:"
+          { head -n 2 "$tmp"; grep -E '\\s(High|Critical)\\s*$' "$tmp" || true; }
+
+          grype "$REF" -o sarif --file grype-frontend-linux-arm64-release.sarif || true
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
       - name: Dockle scan backend image
         if: inputs.enable_dockle == true && needs.detect.outputs.build_backend_image == 'true'
         id: dockle_backend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
           dockle --format json "$REF" > dockle-backend-report.json || true
 
           fatal="$(jq -r '.summary.fatal // 0' dockle-backend-report.json 2>/dev/null || echo 0)"
@@ -2119,13 +2490,44 @@ jobs:
             echo "::warning::Dockle backend failed threshold (${DOCKLE_SEVERITY})"
           fi
 
+      - name: Dockle scan backend image (arm64)
+        if: inputs.enable_dockle == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_backend_image == 'true'
+        id: dockle_backend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
+          dockle --format json "$REF" > dockle-backend-linux-arm64-report.json || true
+
+          fatal="$(jq -r '.summary.fatal // 0' dockle-backend-linux-arm64-report.json 2>/dev/null || echo 0)"
+          warn="$(jq -r '.summary.warn // 0' dockle-backend-linux-arm64-report.json 2>/dev/null || echo 0)"
+          info="$(jq -r '.summary.info // 0' dockle-backend-linux-arm64-report.json 2>/dev/null || echo 0)"
+
+          echo "fatal=${fatal} warn=${warn} info=${info}"
+          echo "::group::Dockle backend (arm64) findings"
+          jq -r '.details[]? | "\(.code) \(.level) \(.title) \(.message)"' dockle-backend-linux-arm64-report.json 2>/dev/null || true
+          echo "::endgroup::"
+
+          rc=0
+          case "${DOCKLE_SEVERITY}" in
+            FATAL) [ "${fatal}" -gt 0 ] && rc=1 || rc=0 ;;
+            WARN)  [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+            INFO)  [ "$((fatal+warn+info))" -gt 0 ] && rc=1 || rc=0 ;;
+            *)     [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+          esac
+
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::Dockle backend (arm64) failed threshold (${DOCKLE_SEVERITY})"
+          fi
+
       - name: Dockle scan frontend image
         if: inputs.enable_dockle == true && needs.detect.outputs.build_frontend_image == 'true'
         id: dockle_frontend_image
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
           dockle --format json "$REF" > dockle-frontend-report.json || true
 
           fatal="$(jq -r '.summary.fatal // 0' dockle-frontend-report.json 2>/dev/null || echo 0)"
@@ -2150,21 +2552,71 @@ jobs:
             echo "::warning::Dockle frontend failed threshold (${DOCKLE_SEVERITY})"
           fi
 
+      - name: Dockle scan frontend image (arm64)
+        if: inputs.enable_dockle == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_frontend_image == 'true'
+        id: dockle_frontend_image_arm64
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
+          dockle --format json "$REF" > dockle-frontend-linux-arm64-report.json || true
+
+          fatal="$(jq -r '.summary.fatal // 0' dockle-frontend-linux-arm64-report.json 2>/dev/null || echo 0)"
+          warn="$(jq -r '.summary.warn // 0' dockle-frontend-linux-arm64-report.json 2>/dev/null || echo 0)"
+          info="$(jq -r '.summary.info // 0' dockle-frontend-linux-arm64-report.json 2>/dev/null || echo 0)"
+
+          echo "fatal=${fatal} warn=${warn} info=${info}"
+          echo "::group::Dockle frontend (arm64) findings"
+          jq -r '.details[]? | "\(.code) \(.level) \(.title) \(.message)"' dockle-frontend-linux-arm64-report.json 2>/dev/null || true
+          echo "::endgroup::"
+
+          rc=0
+          case "${DOCKLE_SEVERITY}" in
+            FATAL) [ "${fatal}" -gt 0 ] && rc=1 || rc=0 ;;
+            WARN)  [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+            INFO)  [ "$((fatal+warn+info))" -gt 0 ] && rc=1 || rc=0 ;;
+            *)     [ "$((fatal+warn))" -gt 0 ] && rc=1 || rc=0 ;;
+          esac
+
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::Dockle frontend (arm64) failed threshold (${DOCKLE_SEVERITY})"
+          fi
+
       - name: Dive analysis backend image
         if: inputs.enable_dive == true && needs.detect.outputs.build_backend_image == 'true'
         continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.backend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::backend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_amd64 is empty"; exit 1; }
+          CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
+
+      - name: Dive analysis backend image (arm64)
+        if: inputs.enable_dive == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_backend_image == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.backend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::backend_ref_linux_arm64 is empty"; exit 1; }
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Dive analysis frontend image
         if: inputs.enable_dive == true && needs.detect.outputs.build_frontend_image == 'true'
+        continue-on-error: true
         run: |
           set -euo pipefail
-          REF="${{ needs.build_and_push_images.outputs.frontend_digest_ref }}"
-          [ -n "$REF" ] || { echo "::error::frontend_digest_ref is empty"; exit 1; }
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_amd64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_amd64 is empty"; exit 1; }
+          CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
+
+      - name: Dive analysis frontend image (arm64)
+        if: inputs.enable_dive == true && inputs.enable_multi_arch == true && needs.detect.outputs.build_frontend_image == 'true'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          REF="${{ steps.resolve_image_refs.outputs.frontend_ref_linux_arm64 }}"
+          [ -n "$REF" ] || { echo "::error::frontend_ref_linux_arm64 is empty"; exit 1; }
           CI=true dive --source docker "$REF" --ci --lowestEfficiency=0.8 || true
 
       - name: Upload release SBOMs
@@ -2173,8 +2625,8 @@ jobs:
         with:
           name: release-sboms
           path: |
-            *-release-sbom.cdx.json
-            *-release-sbom.spdx.json
+            *-release-sbom*.cdx.json
+            *-release-sbom*.spdx.json
           retention-days: 90
           if-no-files-found: ignore
 
@@ -2222,12 +2674,26 @@ jobs:
           sarif_file: trivy-backend-release.sarif
           category: trivy-backend-release
 
+      - name: Upload Trivy backend (arm64) SARIF to code scanning
+        if: inputs.enable_code_scanning == true && inputs.enable_multi_arch == true && steps.trivy_backend_image_arm64.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-backend-linux-arm64-release.sarif
+          category: trivy-backend-linux-arm64-release
+
       - name: Upload Trivy frontend SARIF to code scanning
         if: inputs.enable_code_scanning == true && steps.trivy_frontend_image.outputs.sarif_exists == 'true'
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: trivy-frontend-release.sarif
           category: trivy-frontend-release
+
+      - name: Upload Trivy frontend (arm64) SARIF to code scanning
+        if: inputs.enable_code_scanning == true && inputs.enable_multi_arch == true && steps.trivy_frontend_image_arm64.outputs.sarif_exists == 'true'
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: trivy-frontend-linux-arm64-release.sarif
+          category: trivy-frontend-linux-arm64-release
 
       - name: Upload Grype backend SARIF to code scanning
         if: inputs.enable_code_scanning == true && hashFiles('grype-backend-release.sarif') != ''
@@ -2236,12 +2702,26 @@ jobs:
           sarif_file: grype-backend-release.sarif
           category: grype-backend-release
 
+      - name: Upload Grype backend (arm64) SARIF to code scanning
+        if: inputs.enable_code_scanning == true && inputs.enable_multi_arch == true && hashFiles('grype-backend-linux-arm64-release.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: grype-backend-linux-arm64-release.sarif
+          category: grype-backend-linux-arm64-release
+
       - name: Upload Grype frontend SARIF to code scanning
         if: inputs.enable_code_scanning == true && hashFiles('grype-frontend-release.sarif') != ''
         uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
         with:
           sarif_file: grype-frontend-release.sarif
           category: grype-frontend-release
+
+      - name: Upload Grype frontend (arm64) SARIF to code scanning
+        if: inputs.enable_code_scanning == true && inputs.enable_multi_arch == true && hashFiles('grype-frontend-linux-arm64-release.sarif') != ''
+        uses: github/codeql-action/upload-sarif@1b168cd39490f61582a9beae412bb7057a6b2c4e
+        with:
+          sarif_file: grype-frontend-linux-arm64-release.sarif
+          category: grype-frontend-linux-arm64-release
 
       - name: Upload Snyk container SARIF to code scanning (backend)
         if: inputs.enable_code_scanning == true && hashFiles('snyk-container-backend.sarif') != ''
@@ -2264,10 +2744,16 @@ jobs:
           BUILD_FRONTEND: ${{ needs.detect.outputs.build_frontend_image }}
           TRIVY_BACKEND_COUNT: ${{ steps.trivy_backend_image.outputs.vuln_count }}
           TRIVY_FRONTEND_COUNT: ${{ steps.trivy_frontend_image.outputs.vuln_count }}
+          TRIVY_BACKEND_COUNT_ARM64: ${{ steps.trivy_backend_image_arm64.outputs.vuln_count }}
+          TRIVY_FRONTEND_COUNT_ARM64: ${{ steps.trivy_frontend_image_arm64.outputs.vuln_count }}
           GRYPE_BACKEND_EXIT: ${{ steps.grype_backend_image.outputs.exit_code }}
           GRYPE_FRONTEND_EXIT: ${{ steps.grype_frontend_image.outputs.exit_code }}
+          GRYPE_BACKEND_EXIT_ARM64: ${{ steps.grype_backend_image_arm64.outputs.exit_code }}
+          GRYPE_FRONTEND_EXIT_ARM64: ${{ steps.grype_frontend_image_arm64.outputs.exit_code }}
           DOCKLE_BACKEND_EXIT: ${{ steps.dockle_backend_image.outputs.exit_code }}
           DOCKLE_FRONTEND_EXIT: ${{ steps.dockle_frontend_image.outputs.exit_code }}
+          DOCKLE_BACKEND_EXIT_ARM64: ${{ steps.dockle_backend_image_arm64.outputs.exit_code }}
+          DOCKLE_FRONTEND_EXIT_ARM64: ${{ steps.dockle_frontend_image_arm64.outputs.exit_code }}
           SNYK_CONTAINER_BACKEND_OUTCOME: ${{ steps.snyk_container_backend.outcome }}
           SNYK_CONTAINER_FRONTEND_OUTCOME: ${{ steps.snyk_container_frontend.outcome }}
         run: |
@@ -2277,9 +2763,17 @@ jobs:
             echo "::error::Backend image scan found CRITICAL/HIGH vulns (count=${TRIVY_BACKEND_COUNT})"
             failures=1
           fi
+          if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_BACKEND}" = "true" ] && [ "${TRIVY_BACKEND_COUNT_ARM64:-0}" -ne 0 ]; then
+            echo "::error::Backend image (arm64) scan found CRITICAL/HIGH vulns (count=${TRIVY_BACKEND_COUNT_ARM64})"
+            failures=1
+          fi
 
           if [ "${BUILD_FRONTEND}" = "true" ] && [ "${TRIVY_FRONTEND_COUNT:-0}" -ne 0 ]; then
             echo "::error::Frontend image scan found CRITICAL/HIGH vulns (count=${TRIVY_FRONTEND_COUNT})"
+            failures=1
+          fi
+          if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_FRONTEND}" = "true" ] && [ "${TRIVY_FRONTEND_COUNT_ARM64:-0}" -ne 0 ]; then
+            echo "::error::Frontend image (arm64) scan found CRITICAL/HIGH vulns (count=${TRIVY_FRONTEND_COUNT_ARM64})"
             failures=1
           fi
 
@@ -2287,9 +2781,17 @@ jobs:
             echo "::error::Grype backend failed policy"
             failures=1
           fi
+          if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_BACKEND}" = "true" ] && [ "${GRYPE_BACKEND_EXIT_ARM64:-0}" -ne 0 ]; then
+            echo "::error::Grype backend (arm64) failed policy"
+            failures=1
+          fi
 
           if [ "${BUILD_FRONTEND}" = "true" ] && [ "${GRYPE_FRONTEND_EXIT:-0}" -ne 0 ]; then
             echo "::error::Grype frontend failed policy"
+            failures=1
+          fi
+          if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_FRONTEND}" = "true" ] && [ "${GRYPE_FRONTEND_EXIT_ARM64:-0}" -ne 0 ]; then
+            echo "::error::Grype frontend (arm64) failed policy"
             failures=1
           fi
 
@@ -2298,8 +2800,16 @@ jobs:
               echo "::error::Dockle backend failed threshold (${DOCKLE_SEVERITY})"
               failures=1
             fi
+            if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_BACKEND}" = "true" ] && [ "${DOCKLE_BACKEND_EXIT_ARM64:-0}" -ne 0 ]; then
+              echo "::error::Dockle backend (arm64) failed threshold (${DOCKLE_SEVERITY})"
+              failures=1
+            fi
             if [ "${BUILD_FRONTEND}" = "true" ] && [ "${DOCKLE_FRONTEND_EXIT:-0}" -ne 0 ]; then
               echo "::error::Dockle frontend failed threshold (${DOCKLE_SEVERITY})"
+              failures=1
+            fi
+            if [ "${{ inputs.enable_multi_arch }}" = "true" ] && [ "${BUILD_FRONTEND}" = "true" ] && [ "${DOCKLE_FRONTEND_EXIT_ARM64:-0}" -ne 0 ]; then
+              echo "::error::Dockle frontend (arm64) failed threshold (${DOCKLE_SEVERITY})"
               failures=1
             fi
           fi
