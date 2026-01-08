@@ -851,7 +851,17 @@ jobs:
               ${SUPPRESS_ARG} \
               ${EXTRA_NVD}
           elif [ -f "build.gradle" ] || [ -f "build.gradle.kts" ]; then
-            ./gradlew dependencyCheckAnalyze \
+            if [ -f "./gradlew" ]; then
+              chmod +x ./gradlew || true
+              GRADLE_CMD="./gradlew"
+            elif command -v gradle >/dev/null 2>&1; then
+              GRADLE_CMD="gradle"
+            else
+              echo "::error::Gradle wrapper not found and gradle is not installed."
+              exit 1
+            fi
+
+            "$GRADLE_CMD" dependencyCheckAnalyze \
               -DdependencyCheck.data.directory="${DEPENDENCY_CHECK_DATA}" \
               -DdependencyCheck.autoUpdate="${AUTO_UPDATE}" \
               -DdependencyCheck.format=HTML,JSON,SARIF \
@@ -1242,7 +1252,7 @@ jobs:
     if: inputs.enable_license_compliance == true && needs.detect.outputs.branch_allowed == 'true'
     permissions:
       contents: read
-      actions: write
+      actions: read
     steps:
       - name: Harden runner and checkout
         uses: firassBenNacib/kuble-vault-ops/.github/setup-workflows/harden-checkout@e439c9e1ebdc4d9bb234125d7cb22ca683f15fa7
@@ -1637,19 +1647,28 @@ jobs:
           normalize_repo_component() {
             local input="${1:-}"
             local fallback="${2:-}"
+            local allow_paths="${3:-false}"
             local v="${input:-$fallback}"
 
             v="$(printf '%s' "$v" | tr -d '\r\n')"
             v="${v%%@*}"
             v="${v%%:*}"
-            v="${v##*/}"
             v="$(clean "$v")"
 
             if [ -z "$v" ]; then
               v="$(clean "$fallback")"
             fi
 
-            v="$(printf '%s' "$v" | tr -cd 'a-z0-9._-')"
+            if [ "$allow_paths" = "true" ]; then
+              v="$(printf '%s' "$v" | tr -cd 'a-z0-9._-/')"
+              v="$(printf '%s' "$v" | tr -s '/')"
+              v="${v#/}"
+              v="${v%/}"
+            else
+              v="${v##*/}"
+              v="$(printf '%s' "$v" | tr -cd 'a-z0-9._-')"
+            fi
+
             if [ -z "$v" ]; then
               echo "::error::Resolved repo component is empty/invalid. Check backend_image_repo/frontend_image_repo inputs or BACKEND_IMAGE_REPO/FRONTEND_IMAGE_REPO vars."
               exit 1
@@ -1718,10 +1737,17 @@ jobs:
             exit 1
           fi
 
+          allow_paths=false
+          case "$registry_provider" in
+            ecr|acr|ghcr)
+              allow_paths=true
+              ;;
+          esac
+
           REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
-          BACKEND_COMP="$(normalize_repo_component "${BACKEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-backend")"
-          FRONTEND_COMP="$(normalize_repo_component "${FRONTEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-frontend")"
+          BACKEND_COMP="$(normalize_repo_component "${BACKEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-backend" "$allow_paths")"
+          FRONTEND_COMP="$(normalize_repo_component "${FRONTEND_IMAGE_REPO_EFFECTIVE:-}" "${REPO_NAME}-frontend" "$allow_paths")"
 
           if [ -n "$NAMESPACE" ]; then
             BACKEND_REPO="${REGISTRY}/${NAMESPACE}/${BACKEND_COMP}"
@@ -1943,6 +1969,49 @@ jobs:
           tar -C "$BIN_DIR" -xzf "/tmp/${tgz}" grype
           chmod +x "$BIN_DIR/grype"
           grype version
+
+      - name: Compute Grype cache key
+        id: grype_cache_key
+        run: |
+          set -euo pipefail
+          echo "key=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Grype DB
+        uses: actions/cache@9255dc7a253b0ccc959486e2bca901246202afeb
+        with:
+          path: ~/.cache/grype
+          key: grype-db-${{ runner.os }}-${{ env.GRYPE_VERSION }}-${{ steps.grype_cache_key.outputs.key }}
+          restore-keys: |
+            grype-db-${{ runner.os }}-${{ env.GRYPE_VERSION }}-
+
+      - name: Update Grype DB (retry + cached fallback)
+        run: |
+          set -euo pipefail
+          CACHE_DIR="${HOME}/.cache/grype"
+          export GRYPE_DB_CACHE_DIR="$CACHE_DIR"
+          mkdir -p "$CACHE_DIR"
+
+          updated=false
+          for i in 1 2 3; do
+            if grype db update; then
+              updated=true
+              break
+            fi
+            echo "::warning::Grype DB update failed (attempt $i/3)."
+            sleep $((i * 5))
+          done
+
+          if [ "$updated" != "true" ]; then
+            if find "$CACHE_DIR" -type f \( -name "*.db" -o -name "metadata.json" \) -print -quit | grep -q .; then
+              echo "::warning::Proceeding with cached Grype DB."
+            else
+              echo "::error::Grype DB update failed and no cached DB is available."
+              exit 1
+            fi
+          fi
+
+          echo "GRYPE_DB_CACHE_DIR=$CACHE_DIR" >> "$GITHUB_ENV"
+          echo "GRYPE_DB_AUTO_UPDATE=false" >> "$GITHUB_ENV"
 
       - name: Install Cosign
         if: inputs.enable_image_signing == true
@@ -2948,7 +3017,7 @@ jobs:
               exit 1
             fi
 
-            code="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}${HEALTH_PATH}" || true)"
+            code="$(curl --connect-timeout 2 --max-time 5 -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:${HOST_PORT}${HEALTH_PATH}" || true)"
             if [ "$code" = "200" ]; then
               docker rm -f "$NAME" >/dev/null 2>&1 || true
               exit 0
@@ -3095,7 +3164,7 @@ jobs:
     if: always()
     permissions:
       contents: read
-      actions: write
+      actions: read
     steps:
       - name: Harden Runner
         uses: step-security/harden-runner@20cf305ff2072d973412fa9b1e3a4f227bda3c76

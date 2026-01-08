@@ -55,10 +55,19 @@ runs:
         elif [ "$pm" = "yarn" ]; then
           yver="$(yarn --version | cut -d. -f1)"
           if [ "${yver:-1}" -ge 2 ]; then
-            YARN_NODE_LINKER=node-modules yarn install --immutable
+            if [ -f ".yarnrc.yml" ]; then
+              yarn install --immutable
+            else
+              YARN_NODE_LINKER=node-modules yarn install --immutable
+            fi
           else
             yarn install --frozen-lockfile
           fi
         else
-          npm ci --prefer-offline --no-audit --no-fund
+          if [ -f "package-lock.json" ]; then
+            npm ci --prefer-offline --no-audit --no-fund
+          else
+            echo "::warning::package-lock.json not found; falling back to npm install."
+            npm install --prefer-offline --no-audit --no-fund
+          fi
         fi
